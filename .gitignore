@@ -1,0 +1,16 @@
+# Rust
+/server/target
+**/*.rs.bk
+
+# Node / SDK
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Local data + secrets
+/data/
+.env
+.env.local
+
+# OS
+.DS_Store

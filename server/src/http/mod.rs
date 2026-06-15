@@ -1,0 +1,55 @@
+//! HTTP routing. Two route planes share one router for now (single bind); the
+//! two-listener split (internal vs public ports) is a later task.
+//!
+//!   /internal/v1/*  — key/admin auth: tenants, catalog, grants, S2S file ops
+//!   /v1/*           — public/edge: grant-authorized upload, signed download
+//!   /health         — liveness
+
+use axum::routing::{get, patch, post, put};
+use axum::{Json, Router};
+use serde_json::{json, Value};
+use tower_http::cors::CorsLayer;
+
+use crate::state::AppState;
+use crate::{catalog, files, grants, tenants, usage};
+
+pub fn router(state: AppState) -> Router {
+    Router::new()
+        .route("/health", get(health))
+        .nest("/internal/v1", internal_routes())
+        .nest("/v1", public_routes())
+        .with_state(state)
+}
+
+fn internal_routes() -> Router<AppState> {
+    Router::new()
+        .route("/health", get(health))
+        // provisioning (admin token)
+        .route("/tenants", post(tenants::create_tenant))
+        .route("/tenants/{id}/keys", post(tenants::create_key))
+        .route("/tenants/{id}/quota", patch(tenants::set_quota))
+        // tenant control plane (tenant key)
+        .route("/catalog", put(catalog::register_catalog))
+        .route("/grants", post(grants::mint_grant))
+        .route("/usage", get(usage::get_usage))
+        // server-to-server file ops (tenant key)
+        .route(
+            "/files/{file_ref}",
+            get(files::metadata).delete(files::delete_file),
+        )
+        .route("/files/{file_ref}/content", get(files::content))
+        .route("/files/{file_ref}/sign", post(files::sign))
+}
+
+fn public_routes() -> Router<AppState> {
+    Router::new()
+        .route("/health", get(health))
+        .route("/upload", post(files::upload))
+        .route("/files/{file_ref}", get(files::download))
+        // edge routes are browser-facing
+        .layer(CorsLayer::permissive())
+}
+
+async fn health() -> Json<Value> {
+    Json(json!({ "success": true, "service": "bytehangar", "status": "ok" }))
+}
