@@ -7,6 +7,18 @@ pub enum StorageBackendKind {
     S3,
 }
 
+/// S3-compatible backend settings (S3, MinIO, R2, B2). `endpoint` set => custom
+/// provider; `force_path_style` is required for MinIO.
+#[derive(Clone, Debug)]
+pub struct S3Config {
+    pub bucket: String,
+    pub region: String,
+    pub endpoint: Option<String>,
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub force_path_style: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     /// Public/edge listener port (browser uploads + signed downloads).
@@ -17,6 +29,7 @@ pub struct Config {
     /// Root directory for the local-disk blob backend.
     pub data_root: String,
     pub storage_backend: StorageBackendKind,
+    pub s3: S3Config,
     /// Inviolable global ceiling; per-policy limits may only be stricter.
     pub max_upload_bytes: u64,
     /// Bootstrap admin token for tenant/key provisioning. Empty => admin disabled.
@@ -45,6 +58,17 @@ impl Config {
                         "Unknown STORAGE_BACKEND '{other}' (expected 'local' or 's3')"
                     )))
                 }
+            },
+            s3: S3Config {
+                bucket: env_string("S3_BUCKET", ""),
+                region: env_string("S3_REGION", "us-east-1"),
+                endpoint: match env_string("S3_ENDPOINT", "") {
+                    value if value.is_empty() => None,
+                    value => Some(value),
+                },
+                access_key_id: env_string("S3_ACCESS_KEY_ID", ""),
+                secret_access_key: env_string("S3_SECRET_ACCESS_KEY", ""),
+                force_path_style: env_parse("S3_FORCE_PATH_STYLE", false)?,
             },
             max_upload_bytes: env_parse("MAX_UPLOAD_BYTES", 50 * 1024 * 1024)?,
             admin_token: env_string("ADMIN_TOKEN", ""),

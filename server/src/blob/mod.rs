@@ -9,8 +9,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region};
+use aws_sdk_s3::primitives::ByteStream;
+use aws_sdk_s3::Client as S3Client;
 
-use crate::config::{Config, StorageBackendKind};
+use crate::config::{Config, S3Config, StorageBackendKind};
 use crate::error::{AppError, AppResult};
 
 #[derive(Debug, Clone)]
@@ -30,7 +33,7 @@ pub trait BlobBackend: Send + Sync {
 pub fn from_config(config: &Config) -> AppResult<Arc<dyn BlobBackend>> {
     match config.storage_backend {
         StorageBackendKind::Local => Ok(Arc::new(LocalDisk::new(&config.data_root))),
-        StorageBackendKind::S3 => Ok(Arc::new(S3Backend::new())),
+        StorageBackendKind::S3 => Ok(Arc::new(S3Backend::new(&config.s3)?)),
     }
 }
 
@@ -87,29 +90,114 @@ impl BlobBackend for LocalDisk {
 }
 
 // ---------------------------------------------------------------------------
-// S3-compatible (stub — wired with aws-sdk-s3 in Phase 1)
+// S3-compatible (S3, MinIO, R2, B2)
 // ---------------------------------------------------------------------------
 
-pub struct S3Backend {}
+pub struct S3Backend {
+    client: S3Client,
+    bucket: String,
+}
 
 impl S3Backend {
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(cfg: &S3Config) -> AppResult<Self> {
+        if cfg.bucket.is_empty() {
+            return Err(AppError::Internal(
+                "S3_BUCKET is required for the s3 backend".into(),
+            ));
+        }
+        let credentials = Credentials::new(
+            cfg.access_key_id.clone(),
+            cfg.secret_access_key.clone(),
+            None,
+            None,
+            "bytehangar",
+        );
+        let mut builder = aws_sdk_s3::config::Builder::new()
+            .behavior_version(BehaviorVersion::latest())
+            .region(Region::new(cfg.region.clone()))
+            .credentials_provider(credentials);
+        if let Some(endpoint) = &cfg.endpoint {
+            // Custom provider (MinIO/R2): explicit endpoint + path-style addressing.
+            builder = builder
+                .endpoint_url(endpoint)
+                .force_path_style(cfg.force_path_style);
+        }
+        let client = S3Client::from_conf(builder.build());
+        Ok(Self {
+            client,
+            bucket: cfg.bucket.clone(),
+        })
     }
 }
 
 #[async_trait]
 impl BlobBackend for S3Backend {
-    async fn put(&self, _key: &str, _data: Vec<u8>) -> AppResult<()> {
-        Err(AppError::NotImplemented)
+    async fn put(&self, key: &str, data: Vec<u8>) -> AppResult<()> {
+        self.client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .body(ByteStream::from(data))
+            .send()
+            .await
+            .map_err(|err| AppError::Internal(format!("s3 put: {err}")))?;
+        Ok(())
     }
-    async fn get(&self, _key: &str) -> AppResult<Vec<u8>> {
-        Err(AppError::NotImplemented)
+
+    async fn get(&self, key: &str) -> AppResult<Vec<u8>> {
+        let output = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|err| {
+                let svc = err.into_service_error();
+                if svc.is_no_such_key() {
+                    AppError::NotFound
+                } else {
+                    AppError::Internal(format!("s3 get: {svc}"))
+                }
+            })?;
+        let bytes = output
+            .body
+            .collect()
+            .await
+            .map_err(|err| AppError::Internal(format!("s3 read: {err}")))?
+            .into_bytes();
+        Ok(bytes.to_vec())
     }
-    async fn delete(&self, _key: &str) -> AppResult<()> {
-        Err(AppError::NotImplemented)
+
+    async fn delete(&self, key: &str) -> AppResult<()> {
+        self.client
+            .delete_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|err| AppError::Internal(format!("s3 delete: {err}")))?;
+        Ok(())
     }
-    async fn stat(&self, _key: &str) -> AppResult<BlobStat> {
-        Err(AppError::NotImplemented)
+
+    async fn stat(&self, key: &str) -> AppResult<BlobStat> {
+        let output = self
+            .client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|err| {
+                let svc = err.into_service_error();
+                if svc.is_not_found() {
+                    AppError::NotFound
+                } else {
+                    AppError::Internal(format!("s3 stat: {svc}"))
+                }
+            })?;
+        Ok(BlobStat {
+            size_bytes: output.content_length().unwrap_or(0).max(0) as u64,
+        })
     }
 }
