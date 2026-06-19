@@ -59,6 +59,23 @@ export interface UsageResult {
   objectCount: number;
 }
 
+export interface TenantSummary {
+  id: string;
+  name: string;
+  status: string;
+  quotaBytes: number;
+  createdAt: string;
+  usedBytes: number;
+  objectCount: number;
+}
+
+export interface Page<T> {
+  items: T[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
 /** Error thrown by both SDK halves when the server returns a non-2xx envelope. */
 export class ByteHangarError extends Error {
   readonly status: number;

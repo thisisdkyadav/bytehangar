@@ -33,7 +33,7 @@ pub fn public_router(state: AppState) -> Router {
 fn internal_routes() -> Router<AppState> {
     Router::new()
         // provisioning (admin token)
-        .route("/tenants", post(tenants::create_tenant))
+        .route("/tenants", post(tenants::create_tenant).get(tenants::list_tenants))
         .route("/tenants/{id}/keys", post(tenants::create_key))
         .route("/tenants/{id}/quota", patch(tenants::set_quota))
         .route("/gc", post(gc::gc_handler))
@@ -41,6 +41,7 @@ fn internal_routes() -> Router<AppState> {
         .route("/catalog", put(catalog::register_catalog))
         .route("/grants", post(grants::mint_grant))
         .route("/usage", get(usage::get_usage))
+        .route("/files", get(files::list_files))
         // server-to-server file ops (tenant key)
         .route(
             "/files/{file_ref}",

@@ -5,9 +5,11 @@ import {
   ByteHangarError,
   type FileRecord,
   type GrantResult,
+  type Page,
   type PolicyDefinition,
   type RegisterCatalogResult,
   type SignResult,
+  type TenantSummary,
   type UsageResult,
 } from "../shared/index.js";
 
@@ -129,6 +131,23 @@ export class ByteHangarServer {
     return { usedBytes: data.used_bytes, objectCount: data.object_count };
   }
 
+  /** List this tenant's (live) files, newest first. */
+  async listFiles(
+    opts: { limit?: number; offset?: number; category?: string } = {},
+  ): Promise<Page<FileRecord>> {
+    const data = await this.request<any>(
+      "GET",
+      `/internal/v1/files${queryString(opts)}`,
+      { auth: "key" },
+    );
+    return {
+      items: (data.files as any[]).map(toFileRecord),
+      total: data.total,
+      limit: data.limit,
+      offset: data.offset,
+    };
+  }
+
   // -- admin (require adminToken) ------------------------------------------
 
   async createTenant(name: string): Promise<{ id: string; name: string }> {
@@ -151,6 +170,21 @@ export class ByteHangarServer {
       auth: "admin",
       body: { quota_bytes: quotaBytes },
     });
+  }
+
+  /** List tenants with their usage (admin). */
+  async listTenants(opts: { limit?: number; offset?: number } = {}): Promise<Page<TenantSummary>> {
+    const data = await this.request<any>(
+      "GET",
+      `/internal/v1/tenants${queryString(opts)}`,
+      { auth: "admin" },
+    );
+    return {
+      items: (data.tenants as any[]).map(toTenantSummary),
+      total: data.total,
+      limit: data.limit,
+      offset: data.offset,
+    };
   }
 
   /** Run garbage collection: reclaim blobs for soft-deleted files (dedup-safe). */
@@ -190,6 +224,27 @@ export class ByteHangarServer {
     if (res.status === 204) return undefined as T;
     return (await res.json()) as T;
   }
+}
+
+function queryString(params: Record<string, string | number | undefined>): string {
+  const qs = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null) qs.set(key, String(value));
+  }
+  const s = qs.toString();
+  return s ? `?${s}` : "";
+}
+
+function toTenantSummary(d: any): TenantSummary {
+  return {
+    id: d.id,
+    name: d.name,
+    status: d.status,
+    quotaBytes: d.quota_bytes,
+    createdAt: d.created_at,
+    usedBytes: d.used_bytes,
+    objectCount: d.object_count,
+  };
 }
 
 function toFileRecord(d: any): FileRecord {

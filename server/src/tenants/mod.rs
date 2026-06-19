@@ -4,7 +4,7 @@
 //!
 //! TODO(security): encrypt `signing_secret_enc` at rest with a server master key.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::Json;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -144,6 +144,64 @@ pub async fn create_key(
     .await?;
 
     Ok(Json(CreateKeyResponse { id, key }))
+}
+
+#[derive(Deserialize)]
+pub struct ListQuery {
+    #[serde(default)]
+    pub limit: Option<i64>,
+    #[serde(default)]
+    pub offset: Option<i64>,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub struct TenantSummary {
+    pub id: Uuid,
+    pub name: String,
+    pub status: String,
+    pub quota_bytes: i64,
+    pub created_at: DateTime<Utc>,
+    pub used_bytes: i64,
+    pub object_count: i64,
+}
+
+#[derive(Serialize)]
+pub struct TenantListResponse {
+    pub tenants: Vec<TenantSummary>,
+    pub total: i64,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+/// List tenants with their current usage (admin).
+pub async fn list_tenants(
+    _admin: AdminAuth,
+    State(state): State<AppState>,
+    Query(query): Query<ListQuery>,
+) -> AppResult<Json<TenantListResponse>> {
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+    let offset = query.offset.unwrap_or(0).max(0);
+
+    let tenants = sqlx::query_as::<_, TenantSummary>(
+        "SELECT t.id, t.name, t.status, t.quota_bytes, t.created_at, \
+                COALESCE(c.used_bytes, 0) AS used_bytes, COALESCE(c.object_count, 0) AS object_count \
+         FROM tenants t LEFT JOIN usage_counters c ON c.tenant_id = t.id \
+         ORDER BY t.created_at DESC LIMIT $1 OFFSET $2",
+    )
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(&state.db)
+    .await?;
+    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM tenants")
+        .fetch_one(&state.db)
+        .await?;
+
+    Ok(Json(TenantListResponse {
+        tenants,
+        total,
+        limit,
+        offset,
+    }))
 }
 
 #[derive(Deserialize)]

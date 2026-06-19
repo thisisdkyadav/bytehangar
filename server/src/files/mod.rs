@@ -411,6 +411,81 @@ pub async fn download(
 // Internal file operations  (auth: tenant key)
 // ---------------------------------------------------------------------------
 
+#[derive(Deserialize)]
+pub struct ListFilesQuery {
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    offset: Option<i64>,
+    #[serde(default)]
+    category: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct FileListResponse {
+    pub files: Vec<FileRecord>,
+    pub total: i64,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+/// List this tenant's (live) files, newest first; optional category filter.
+pub async fn list_files(
+    ctx: TenantContext,
+    State(state): State<AppState>,
+    Query(query): Query<ListFilesQuery>,
+) -> AppResult<Json<FileListResponse>> {
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+    let offset = query.offset.unwrap_or(0).max(0);
+    let tenant_id = ctx.tenant.id;
+
+    let (files, total) = if let Some(category) = &query.category {
+        let files = sqlx::query_as::<_, FileRecord>(&format!(
+            "SELECT {FILE_COLUMNS} FROM files \
+             WHERE tenant_id = $1 AND deleted_at IS NULL AND category = $2 \
+             ORDER BY created_at DESC LIMIT $3 OFFSET $4"
+        ))
+        .bind(tenant_id)
+        .bind(category)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&state.db)
+        .await?;
+        let total: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM files WHERE tenant_id = $1 AND deleted_at IS NULL AND category = $2",
+        )
+        .bind(tenant_id)
+        .bind(category)
+        .fetch_one(&state.db)
+        .await?;
+        (files, total)
+    } else {
+        let files = sqlx::query_as::<_, FileRecord>(&format!(
+            "SELECT {FILE_COLUMNS} FROM files \
+             WHERE tenant_id = $1 AND deleted_at IS NULL \
+             ORDER BY created_at DESC LIMIT $2 OFFSET $3"
+        ))
+        .bind(tenant_id)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&state.db)
+        .await?;
+        let total: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM files WHERE tenant_id = $1 AND deleted_at IS NULL")
+                .bind(tenant_id)
+                .fetch_one(&state.db)
+                .await?;
+        (files, total)
+    };
+
+    Ok(Json(FileListResponse {
+        files,
+        total,
+        limit,
+        offset,
+    }))
+}
+
 pub async fn metadata(
     ctx: TenantContext,
     State(state): State<AppState>,

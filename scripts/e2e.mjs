@@ -125,6 +125,20 @@ async function main() {
     dlBig.length === big.length && Buffer.compare(dlBig, big) === 0,
   );
 
+  // --- list endpoints ---
+  const allFiles = await storage.listFiles();
+  check("listFiles returns live files", allFiles.total >= 3 && allFiles.items.length >= 3);
+  const imageFiles = await storage.listFiles({ category: "images" });
+  check(
+    "listFiles category filter",
+    imageFiles.items.length >= 2 && imageFiles.items.every((f) => f.category === "images"),
+  );
+  const tenantList = await admin.listTenants({ limit: 200 });
+  check(
+    "listTenants includes our tenant with usage",
+    tenantList.items.some((t) => t.id === tenant.id && t.objectCount >= 1),
+  );
+
   // --- quota enforcement ---
   await admin.setQuota(tenant.id, 1); // 1 byte: any further upload exceeds
   const grantQ = await storage.createGrant("img");
