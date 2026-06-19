@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::auth::AdminAuth;
 use crate::crypto;
 use crate::error::{AppError, AppResult};
+use crate::secrets::Secrets;
 use crate::state::AppState;
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -39,16 +40,33 @@ impl Tenant {
 const TENANT_COLUMNS: &str = "id, name, status, signing_secret_enc, quota_bytes, created_at, \
      download_auth_url, webhook_url, webhook_secret";
 
-pub async fn find_tenant_by_id(db: &PgPool, id: Uuid) -> AppResult<Option<Tenant>> {
+/// Decrypt a loaded tenant's at-rest secrets into runtime plaintext.
+fn decrypt_tenant(secrets: &Secrets, mut tenant: Tenant) -> Tenant {
+    tenant.signing_secret_enc = secrets.decrypt(&tenant.signing_secret_enc);
+    if let Some(webhook_secret) = tenant.webhook_secret.take() {
+        tenant.webhook_secret = Some(secrets.decrypt(&webhook_secret));
+    }
+    tenant
+}
+
+pub async fn find_tenant_by_id(
+    db: &PgPool,
+    secrets: &Secrets,
+    id: Uuid,
+) -> AppResult<Option<Tenant>> {
     let query = format!("SELECT {TENANT_COLUMNS} FROM tenants WHERE id = $1");
     let tenant = sqlx::query_as::<_, Tenant>(&query)
         .bind(id)
         .fetch_optional(db)
         .await?;
-    Ok(tenant)
+    Ok(tenant.map(|t| decrypt_tenant(secrets, t)))
 }
 
-pub async fn find_tenant_by_key_hash(db: &PgPool, key_hash: &str) -> AppResult<Option<Tenant>> {
+pub async fn find_tenant_by_key_hash(
+    db: &PgPool,
+    secrets: &Secrets,
+    key_hash: &str,
+) -> AppResult<Option<Tenant>> {
     let tenant = sqlx::query_as::<_, Tenant>(
         "SELECT t.id, t.name, t.status, t.signing_secret_enc, t.quota_bytes, t.created_at, \
                 t.download_auth_url, t.webhook_url, t.webhook_secret \
@@ -58,7 +76,7 @@ pub async fn find_tenant_by_key_hash(db: &PgPool, key_hash: &str) -> AppResult<O
     .bind(key_hash)
     .fetch_optional(db)
     .await?;
-    Ok(tenant)
+    Ok(tenant.map(|t| decrypt_tenant(secrets, t)))
 }
 
 // ---------------------------------------------------------------------------
@@ -84,7 +102,7 @@ pub async fn create_tenant(
     if req.name.trim().is_empty() {
         return Err(AppError::BadRequest("name is required".into()));
     }
-    let secret = crypto::random_token(32);
+    let secret = state.secrets.encrypt(&crypto::random_token(32));
 
     let query = format!(
         "INSERT INTO tenants (name, signing_secret_enc) VALUES ($1, $2) RETURNING {TENANT_COLUMNS}"
@@ -127,7 +145,7 @@ pub async fn create_key(
     Path(tenant_id): Path<Uuid>,
     Json(req): Json<CreateKeyRequest>,
 ) -> AppResult<Json<CreateKeyResponse>> {
-    let tenant = find_tenant_by_id(&state.db, tenant_id)
+    let tenant = find_tenant_by_id(&state.db, &state.secrets, tenant_id)
         .await?
         .ok_or(AppError::NotFound)?;
 
@@ -287,9 +305,11 @@ pub async fn set_webhook(
         Some(url) => (Some(url), Some(req.secret.unwrap_or_else(|| crypto::random_token(32)))),
         None => (None, None),
     };
+    // Plaintext secret is returned to the admin; only the at-rest copy is encrypted.
+    let stored_secret = secret.as_deref().map(|s| state.secrets.encrypt(s));
     let affected = sqlx::query("UPDATE tenants SET webhook_url = $1, webhook_secret = $2 WHERE id = $3")
         .bind(url.as_deref())
-        .bind(secret.as_deref())
+        .bind(stored_secret.as_deref())
         .bind(tenant_id)
         .execute(&state.db)
         .await?

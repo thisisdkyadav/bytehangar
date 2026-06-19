@@ -42,6 +42,8 @@ pub struct Config {
     pub bind: String,
     /// Bind address for the internal listener (defaults to loopback — keep it private).
     pub internal_bind: String,
+    /// Master key for encrypting tenant secrets at rest. Empty => stored as plaintext.
+    pub master_key: String,
 }
 
 impl Config {
@@ -80,6 +82,7 @@ impl Config {
             public_base_url: env_string("PUBLIC_BASE_URL", ""),
             bind: env_string("BIND_ADDRESS", "0.0.0.0"),
             internal_bind: env_string("INTERNAL_BIND_ADDRESS", "127.0.0.1"),
+            master_key: env_string("MASTER_KEY", ""),
         })
     }
 }

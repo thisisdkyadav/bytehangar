@@ -54,7 +54,7 @@ impl FromRequestParts<AppState> for TenantContext {
             .ok_or(AppError::Unauthorized)?;
 
         let hash = crypto::sha256_hex(key.as_bytes());
-        let tenant = tenants::find_tenant_by_key_hash(&state.db, &hash)
+        let tenant = tenants::find_tenant_by_key_hash(&state.db, &state.secrets, &hash)
             .await?
             .ok_or(AppError::Unauthorized)?;
 
@@ -87,7 +87,7 @@ impl FromRequestParts<AppState> for GrantContext {
         // Peek tenant id (unverified) -> load tenant secret -> verify signature.
         let peek = crypto::peek_grant_claims(&token)?;
         let tenant_id = Uuid::parse_str(&peek.t).map_err(|_| AppError::Unauthorized)?;
-        let tenant = tenants::find_tenant_by_id(&state.db, tenant_id)
+        let tenant = tenants::find_tenant_by_id(&state.db, &state.secrets, tenant_id)
             .await?
             .ok_or(AppError::Unauthorized)?;
         let claims = crypto::decode_grant(tenant.signing_secret(), &token)?;

@@ -13,6 +13,7 @@ export ADMIN_TOKEN="${ADMIN_TOKEN:-e2e-admin-token}"
 export PORT="${PORT:-5180}"
 export INTERNAL_PORT="${INTERNAL_PORT:-5101}"
 export INTERNAL_BIND_ADDRESS="${INTERNAL_BIND_ADDRESS:-127.0.0.1}"
+export MASTER_KEY="${MASTER_KEY:-e2e-master-key-change-me}"
 export STORAGE_BACKEND="${STORAGE_BACKEND:-local}"
 export DATA_ROOT="${DATA_ROOT:-$ROOT/.e2e-data}"
 

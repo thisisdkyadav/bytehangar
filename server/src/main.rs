@@ -13,6 +13,7 @@ mod files;
 mod gc;
 mod grants;
 mod http;
+mod secrets;
 mod state;
 mod tenants;
 mod usage;
@@ -40,6 +41,12 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let blob = blob::from_config(&config)?;
+    let secrets = Arc::new(secrets::Secrets::new(&config.master_key));
+    if secrets.enabled() {
+        tracing::info!("tenant secrets encrypted at rest");
+    } else {
+        tracing::warn!("MASTER_KEY not set — tenant secrets stored as plaintext");
+    }
 
     let public_addr = format!("{}:{}", config.bind, config.port);
     let internal_addr = format!("{}:{}", config.internal_bind, config.internal_port);
@@ -48,6 +55,7 @@ async fn main() -> anyhow::Result<()> {
         config: Arc::new(config),
         db,
         blob,
+        secrets,
     };
 
     let public_listener = tokio::net::TcpListener::bind(&public_addr).await?;

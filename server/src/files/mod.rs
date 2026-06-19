@@ -382,7 +382,7 @@ pub async fn download(
     headers: HeaderMap,
 ) -> AppResult<Response> {
     let tenant_id = Uuid::parse_str(&query.t).map_err(|_| AppError::Unauthorized)?;
-    let tenant = tenants::find_tenant_by_id(&state.db, tenant_id)
+    let tenant = tenants::find_tenant_by_id(&state.db, &state.secrets, tenant_id)
         .await?
         .ok_or(AppError::Unauthorized)?;
     let file = find_file(&state.db, tenant_id, &file_ref)
