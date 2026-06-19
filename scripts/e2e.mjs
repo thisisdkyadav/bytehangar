@@ -10,7 +10,8 @@
 import { ByteHangarServer } from "../sdk/dist/server/index.js";
 import { ByteHangarClient } from "../sdk/dist/client/index.js";
 
-const BASE = process.env.BYTEHANGAR_URL ?? "http://localhost:5180";
+const PUBLIC = process.env.BYTEHANGAR_PUBLIC_URL ?? "http://localhost:5180";
+const INTERNAL = process.env.BYTEHANGAR_INTERNAL_URL ?? "http://127.0.0.1:5101";
 const ADMIN = process.env.ADMIN_TOKEN ?? "e2e-admin-token";
 
 let passed = 0;
@@ -32,17 +33,21 @@ function pngBytes(salt = 0) {
 }
 
 async function main() {
-  console.log(`ByteHangar e2e against ${BASE}\n`);
+  console.log(`ByteHangar e2e — public ${PUBLIC}, internal ${INTERNAL}\n`);
 
-  // --- provision (admin) ---
-  const admin = new ByteHangarServer({ baseUrl: BASE, apiKey: "", adminToken: ADMIN });
+  // --- provision (admin, internal plane) ---
+  const admin = new ByteHangarServer({ baseUrl: INTERNAL, apiKey: "", adminToken: ADMIN });
   const tenant = await admin.createTenant(`e2e-${Date.now()}`);
   check("createTenant returns id", typeof tenant.id === "string" && tenant.id.length > 0);
   const created = await admin.createKey(tenant.id, "e2e-key");
   check("createKey returns plaintext key", created.key?.startsWith("bh_"));
 
-  const storage = new ByteHangarServer({ baseUrl: BASE, apiKey: created.key });
-  const client = new ByteHangarClient({ baseUrl: BASE });
+  const storage = new ByteHangarServer({ baseUrl: INTERNAL, apiKey: created.key });
+  const client = new ByteHangarClient({ baseUrl: PUBLIC });
+
+  // --- plane isolation: internal routes must NOT be on the public port ---
+  const probe = await fetch(`${PUBLIC}/internal/v1/usage`);
+  check("internal plane not exposed on public port", probe.status === 404);
 
   // --- catalog (idempotent) ---
   const policies = [
@@ -77,7 +82,7 @@ async function main() {
 
   // --- signed download round-trips the exact bytes ---
   const signed = await storage.signDownload(up.fileRef);
-  const dlUrl = signed.url.startsWith("http") ? signed.url : BASE + signed.url;
+  const dlUrl = signed.url.startsWith("http") ? signed.url : PUBLIC +signed.url;
   const dl = await fetch(dlUrl);
   const got = Buffer.from(await dl.arrayBuffer());
   check("signed download is 200", dl.status === 200);
@@ -113,7 +118,7 @@ async function main() {
   });
   check("large upload size matches (6 MiB)", upBig.size === big.length);
   const signedBig = await storage.signDownload(upBig.fileRef);
-  const bigUrl = signedBig.url.startsWith("http") ? signedBig.url : BASE + signedBig.url;
+  const bigUrl = signedBig.url.startsWith("http") ? signedBig.url : PUBLIC +signedBig.url;
   const dlBig = Buffer.from(await (await fetch(bigUrl)).arrayBuffer());
   check(
     "large download byte-exact (6 MiB)",

@@ -14,17 +14,24 @@ use tower_http::cors::CorsLayer;
 use crate::state::AppState;
 use crate::{catalog, files, grants, tenants, usage};
 
-pub fn router(state: AppState) -> Router {
+/// Internal plane: key/admin auth. Bind privately (loopback or a private network).
+pub fn internal_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .nest("/internal/v1", internal_routes())
+        .with_state(state)
+}
+
+/// Public/edge plane: browser-facing (grant upload, signed download).
+pub fn public_router(state: AppState) -> Router {
+    Router::new()
+        .route("/health", get(health))
         .nest("/v1", public_routes())
         .with_state(state)
 }
 
 fn internal_routes() -> Router<AppState> {
     Router::new()
-        .route("/health", get(health))
         // provisioning (admin token)
         .route("/tenants", post(tenants::create_tenant))
         .route("/tenants/{id}/keys", post(tenants::create_key))

@@ -38,6 +38,10 @@ pub struct Config {
     pub signed_url_ttl_seconds: i64,
     /// Public base URL (scheme+host) prefixed onto signed download URLs. Empty => relative path.
     pub public_base_url: String,
+    /// Bind address for the public/edge listener.
+    pub bind: String,
+    /// Bind address for the internal listener (defaults to loopback — keep it private).
+    pub internal_bind: String,
 }
 
 impl Config {
@@ -74,6 +78,8 @@ impl Config {
             admin_token: env_string("ADMIN_TOKEN", ""),
             signed_url_ttl_seconds: env_parse("SIGNED_URL_TTL_SECONDS", 300)?,
             public_base_url: env_string("PUBLIC_BASE_URL", ""),
+            bind: env_string("BIND_ADDRESS", "0.0.0.0"),
+            internal_bind: env_string("INTERNAL_BIND_ADDRESS", "127.0.0.1"),
         })
     }
 }

@@ -16,6 +16,7 @@ mod state;
 mod tenants;
 mod usage;
 
+use std::future::IntoFuture;
 use std::sync::Arc;
 
 use crate::config::Config;
@@ -38,18 +39,23 @@ async fn main() -> anyhow::Result<()> {
 
     let blob = blob::from_config(&config)?;
 
-    let addr = format!("0.0.0.0:{}", config.port);
+    let public_addr = format!("{}:{}", config.bind, config.port);
+    let internal_addr = format!("{}:{}", config.internal_bind, config.internal_port);
+
     let state = AppState {
         config: Arc::new(config),
         db,
         blob,
     };
 
-    let app = http::router(state);
+    let public_listener = tokio::net::TcpListener::bind(&public_addr).await?;
+    let internal_listener = tokio::net::TcpListener::bind(&internal_addr).await?;
+    tracing::info!("public plane on {public_addr}, internal plane on {internal_addr}");
 
-    tracing::info!("bytehangar listening on {addr}");
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app).await?;
+    tokio::try_join!(
+        axum::serve(public_listener, http::public_router(state.clone())).into_future(),
+        axum::serve(internal_listener, http::internal_router(state)).into_future(),
+    )?;
 
     Ok(())
 }
