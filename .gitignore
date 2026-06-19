@@ -14,3 +14,7 @@ dist/
 
 # OS
 .DS_Store
+
+# e2e artifacts
+/.e2e-data/
+/.e2e-server.log
