@@ -208,3 +208,60 @@ async function toError(res: Response): Promise<ByteHangarError> {
   }
   return new ByteHangarError(message, res.status);
 }
+
+export interface GrantRouteOptions {
+  /** Decide the policy for this request. Default: read `{ policyKey }` from the JSON body. */
+  resolvePolicy?: (req: Request) => Promise<string> | string;
+  /** Your authorization check. STRONGLY recommended — without it, anyone who can
+   *  reach the route can mint grants. Return false to reject (403). */
+  authorize?: (req: Request) => Promise<boolean> | boolean;
+  expiresInSeconds?: number;
+}
+
+/**
+ * Build a Web-standard `Request -> Response` handler that mints an upload grant.
+ * Works in any fetch-based framework (Next.js App Router, Remix, Hono, Bun, Deno,
+ * Cloudflare Workers). For Express, read `req.body.policyKey` and call
+ * `storage.createGrant` directly instead.
+ *
+ *   export const POST = createGrantRoute(storage, {
+ *     resolvePolicy: () => "profile-image",
+ *     authorize: (req) => myAuth(req),
+ *   });
+ */
+export function createGrantRoute(
+  storage: ByteHangarServer,
+  options: GrantRouteOptions = {},
+): (req: Request) => Promise<Response> {
+  const json = (body: unknown, status: number) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { "content-type": "application/json" },
+    });
+
+  return async (req: Request): Promise<Response> => {
+    try {
+      if (options.authorize && !(await options.authorize(req))) {
+        return json({ success: false, message: "forbidden" }, 403);
+      }
+      let policyKey: string | undefined;
+      if (options.resolvePolicy) {
+        policyKey = await options.resolvePolicy(req);
+      } else {
+        const body = (await req.json().catch(() => ({}))) as { policyKey?: string };
+        policyKey = body.policyKey;
+      }
+      if (!policyKey) {
+        return json({ success: false, message: "policyKey is required" }, 400);
+      }
+      const grant = await storage.createGrant(policyKey, {
+        expiresInSeconds: options.expiresInSeconds,
+      });
+      return json(grant, 200);
+    } catch (err) {
+      const status = err instanceof ByteHangarError ? err.status || 500 : 500;
+      const message = err instanceof Error ? err.message : "internal error";
+      return json({ success: false, message }, status);
+    }
+  };
+}

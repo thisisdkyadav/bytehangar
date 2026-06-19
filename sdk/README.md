@@ -33,10 +33,22 @@ await storage.registerCatalog([
 ## 2. Mint a grant for an authorized client (server)
 
 ```ts
-// In your own route, AFTER you've authenticated + authorized the user:
+// Express — read the policy + run your own authz, then mint:
 app.post("/uploads/profile", async (req, res) => {
   const { token } = await storage.createGrant("profile-image");
   res.json({ token });
+});
+```
+
+Or, for any fetch-based framework (Next.js App Router, Remix, Hono, Bun, Deno,
+Workers), use the one-liner helper:
+
+```ts
+import { createGrantRoute } from "@bytehangar/sdk/server";
+
+export const POST = createGrantRoute(storage, {
+  resolvePolicy: () => "profile-image",
+  authorize: (req) => myAuth(req), // strongly recommended
 });
 ```
 
