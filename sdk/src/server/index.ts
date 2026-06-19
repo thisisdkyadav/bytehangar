@@ -153,6 +153,17 @@ export class ByteHangarServer {
     });
   }
 
+  /** Run garbage collection: reclaim blobs for soft-deleted files (dedup-safe). */
+  async gc(
+    opts: { tenantId?: string; olderThanSeconds?: number } = {},
+  ): Promise<{ blobsDeleted: number; rowsPurged: number }> {
+    const data = await this.request<any>("POST", "/internal/v1/gc", {
+      auth: "admin",
+      body: { tenant_id: opts.tenantId, older_than_seconds: opts.olderThanSeconds },
+    });
+    return { blobsDeleted: data.blobs_deleted, rowsPurged: data.rows_purged };
+  }
+
   // -- internals ------------------------------------------------------------
 
   private async request<T>(

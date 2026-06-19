@@ -10,6 +10,7 @@ mod db;
 mod domain;
 mod error;
 mod files;
+mod gc;
 mod grants;
 mod http;
 mod state;

@@ -146,6 +146,19 @@ async function main() {
   }
   check("deleted file not found", gone);
 
+  // --- GC + dedup refcount safety ---
+  // `up` (now deleted) and `up2` (still live) share the same blob via dedup.
+  await admin.gc({ olderThanSeconds: 0 });
+  const sharedSigned = await storage.signDownload(up2.fileRef);
+  const sharedUrl = sharedSigned.url.startsWith("http") ? sharedSigned.url : PUBLIC + sharedSigned.url;
+  const sharedRes = await fetch(sharedUrl);
+  check("GC keeps a blob still referenced by a live (deduped) file", sharedRes.status === 200);
+
+  // delete the last reference, then GC should reclaim the blob
+  await storage.deleteFile(up2.fileRef);
+  const gc2 = await admin.gc({ olderThanSeconds: 0 });
+  check("GC reclaims the blob after the last reference is deleted", gc2.blobsDeleted >= 1);
+
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
 }

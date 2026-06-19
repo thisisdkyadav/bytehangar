@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use tower_http::cors::CorsLayer;
 
 use crate::state::AppState;
-use crate::{catalog, files, grants, tenants, usage};
+use crate::{catalog, files, gc, grants, tenants, usage};
 
 /// Internal plane: key/admin auth. Bind privately (loopback or a private network).
 pub fn internal_router(state: AppState) -> Router {
@@ -36,6 +36,7 @@ fn internal_routes() -> Router<AppState> {
         .route("/tenants", post(tenants::create_tenant))
         .route("/tenants/{id}/keys", post(tenants::create_key))
         .route("/tenants/{id}/quota", patch(tenants::set_quota))
+        .route("/gc", post(gc::gc_handler))
         // tenant control plane (tenant key)
         .route("/catalog", put(catalog::register_catalog))
         .route("/grants", post(grants::mint_grant))
