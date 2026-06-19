@@ -28,6 +28,14 @@ async fn main() -> anyhow::Result<()> {
 
     let config = Config::from_env()?;
     let db = db::connect(&config.database_url)?;
+
+    // Self-migrate on boot. Best-effort: if the DB is unreachable the server still
+    // comes up and serves /health (the pool connects lazily on first real query).
+    match sqlx::migrate!("./migrations").run(&db).await {
+        Ok(()) => tracing::info!("migrations applied"),
+        Err(err) => tracing::warn!("migrations not applied (database unavailable?): {err}"),
+    }
+
     let blob = blob::from_config(&config)?;
 
     let addr = format!("0.0.0.0:{}", config.port);
