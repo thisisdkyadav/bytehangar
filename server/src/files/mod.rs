@@ -1,22 +1,27 @@
 //! Files: the edge upload + download pipeline and internal file operations.
 //!
-//! Upload enforces, in order: grant signature → grant not expired → size cap
-//! (grant ∩ global) → content-type (sniffed) ∈ policy ∩ master allowlist →
-//! content-addressed dedup → blob write → single-use nonce consume + metadata +
-//! usage, atomically. New blobs are best-effort cleaned up if the tx fails.
+//! Upload streams the body straight to the blob backend (bounded memory): it
+//! buffers only a small head for content sniffing, hashes + size-caps on the fly,
+//! and dedupes after the write (dropping the duplicate). Download/content stream
+//! the bytes back without buffering.
 
 use axum::body::Body;
+use axum::extract::multipart::Field;
 use axum::extract::{Multipart, Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::Response;
 use axum::Json;
+use bytes::Bytes;
 use chrono::{DateTime, Datelike, Duration, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::auth::{GrantContext, TenantContext};
+use crate::blob::BlobBackend;
 use crate::crypto;
+use crate::domain::GrantClaims;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use crate::{tenants, usage};
@@ -29,6 +34,9 @@ const MASTER_CONTENT_TYPES: &[&str] = &[
     "image/gif",
     "application/pdf",
 ];
+
+/// Bytes buffered up-front for magic-byte content sniffing.
+const SNIFF_LEN: usize = 8192;
 
 fn master_allowed(content_type: &str) -> bool {
     MASTER_CONTENT_TYPES.contains(&content_type)
@@ -93,6 +101,16 @@ pub struct UploadResponse {
     pub deduplicated: bool,
 }
 
+/// What `stream_field` produced after writing the body to the backend.
+struct Staged {
+    file_id: Uuid,
+    stored_key: String,
+    content_type: String,
+    size: i64,
+    checksum: String,
+    file_name: Option<String>,
+}
+
 pub async fn upload(
     grant: GrantContext,
     State(state): State<AppState>,
@@ -101,32 +119,17 @@ pub async fn upload(
     // Grant already verified (signature + expiry) by the extractor, before the body.
     let GrantContext { tenant, claims } = grant;
     let tenant_id = tenant.id;
+    let max = std::cmp::min(claims.max, state.config.max_upload_bytes);
 
-    let max = std::cmp::min(claims.max, state.config.max_upload_bytes) as usize;
-
-    // 2. Read the `file` field, capping size as we stream.
-    let mut payload: Option<(Vec<u8>, Option<String>, Option<String>)> = None;
+    // Find and stream the `file` field to the backend (bounded memory).
+    let mut staged: Option<Staged> = None;
     while let Some(field) = multipart
         .next_field()
         .await
         .map_err(|err| AppError::BadRequest(err.to_string()))?
     {
         if field.name() == Some("file") {
-            let file_name = field.file_name().map(|s| s.to_string());
-            let declared_ct = field.content_type().map(|s| s.to_string());
-            let mut field = field;
-            let mut data = Vec::new();
-            while let Some(chunk) = field
-                .chunk()
-                .await
-                .map_err(|err| AppError::BadRequest(err.to_string()))?
-            {
-                if data.len() + chunk.len() > max {
-                    return Err(AppError::PayloadTooLarge);
-                }
-                data.extend_from_slice(&chunk);
-            }
-            payload = Some((data, file_name, declared_ct));
+            staged = Some(stream_field(state.blob.as_ref(), tenant_id, &claims, max, field).await?);
             break;
         } else {
             let _ = field
@@ -135,63 +138,31 @@ pub async fn upload(
                 .map_err(|err| AppError::BadRequest(err.to_string()))?;
         }
     }
-    let (data, file_name, declared_ct) =
-        payload.ok_or_else(|| AppError::BadRequest("missing 'file' field".into()))?;
-    if data.is_empty() {
-        return Err(AppError::BadRequest("empty file".into()));
-    }
+    let staged = staged.ok_or_else(|| AppError::BadRequest("missing 'file' field".into()))?;
 
-    // 3. Resolve + enforce content type (sniffed wins).
-    let sniffed = infer::get(&data).map(|t| t.mime_type().to_string());
-    let content_type = sniffed
-        .or(declared_ct)
-        .unwrap_or_else(|| "application/octet-stream".to_string());
-    if !master_allowed(&content_type) {
-        return Err(AppError::Forbidden);
-    }
-    if !claims.ct.is_empty() && !claims.ct.iter().any(|c| c == &content_type) {
-        return Err(AppError::BadRequest(format!(
-            "content type '{content_type}' not allowed by policy"
-        )));
-    }
-
-    let size = data.len() as i64;
-    let checksum = crypto::sha256_hex(&data);
-
-    // 4. Content-addressed dedup: reuse an existing blob with the same checksum.
+    // Write-then-dedupe: if identical bytes already exist, drop the one we wrote.
     let existing_key: Option<String> = sqlx::query_scalar(
         "SELECT stored_key FROM files WHERE tenant_id = $1 AND checksum_sha256 = $2 AND deleted_at IS NULL LIMIT 1",
     )
     .bind(tenant_id)
-    .bind(&checksum)
+    .bind(&staged.checksum)
     .fetch_optional(&state.db)
     .await?;
 
-    let file_id = Uuid::now_v7();
-    let ext = ext_for(&content_type, file_name.as_deref());
     let (stored_key, wrote_new, deduplicated) = match existing_key {
-        Some(key) => (key, false, true),
-        None => {
-            let id_hex = file_id.simple().to_string();
-            let now = Utc::now();
-            let key = format!(
-                "{}/{}/{}/{:02}/{}/{}.{}",
-                tenant_id,
-                claims.cat,
-                now.year(),
-                now.month(),
-                &id_hex[0..2],
-                id_hex,
-                ext
-            );
-            state.blob.put(&key, data).await?;
-            (key, true, false)
+        Some(existing) if existing != staged.stored_key => {
+            let _ = state.blob.delete(&staged.stored_key).await;
+            (existing, false, true)
         }
+        _ => (staged.stored_key.clone(), true, false),
     };
 
     let file_ref = crypto::random_token(16);
+    let size = staged.size;
+    let content_type = staged.content_type.clone();
+    let file_name = staged.file_name.clone();
 
-    // 5. Atomic: consume the single-use nonce, check quota, insert metadata, meter.
+    // Atomic: consume the single-use nonce, check quota, insert metadata, meter.
     let committed: AppResult<()> = async {
         let mut tx = state.db.begin().await?;
 
@@ -227,7 +198,7 @@ pub async fn upload(
              (id, tenant_id, file_ref, policy_key, category, original_name, stored_key, content_type, size_bytes, checksum_sha256) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
         )
-        .bind(file_id)
+        .bind(staged.file_id)
         .bind(tenant_id)
         .bind(&file_ref)
         .bind(&claims.p)
@@ -236,7 +207,7 @@ pub async fn upload(
         .bind(&stored_key)
         .bind(&content_type)
         .bind(size)
-        .bind(&checksum)
+        .bind(&staged.checksum)
         .execute(&mut *tx)
         .await?;
 
@@ -260,6 +231,118 @@ pub async fn upload(
         original_name: file_name,
         deduplicated,
     }))
+}
+
+/// Stream one multipart field to the blob backend: sniff (head) -> enforce ->
+/// stream (hash + size-cap) -> commit. Aborts the writer on any failure.
+async fn stream_field(
+    blob: &dyn BlobBackend,
+    tenant_id: Uuid,
+    claims: &GrantClaims,
+    max: u64,
+    field: Field<'_>,
+) -> AppResult<Staged> {
+    let file_name = field.file_name().map(|s| s.to_string());
+    let declared_ct = field.content_type().map(|s| s.to_string());
+    let mut field = field;
+
+    // 1. Buffer a small head for content sniffing (still under the size cap).
+    let mut head: Vec<u8> = Vec::new();
+    loop {
+        match field
+            .chunk()
+            .await
+            .map_err(|err| AppError::BadRequest(err.to_string()))?
+        {
+            Some(chunk) => {
+                if head.len() as u64 + chunk.len() as u64 > max {
+                    return Err(AppError::PayloadTooLarge);
+                }
+                head.extend_from_slice(&chunk);
+                if head.len() >= SNIFF_LEN {
+                    break;
+                }
+            }
+            None => break,
+        }
+    }
+    if head.is_empty() {
+        return Err(AppError::BadRequest("empty file".into()));
+    }
+
+    // 2. Resolve + enforce content type before writing anything.
+    let sniffed = infer::get(&head).map(|t| t.mime_type().to_string());
+    let content_type = sniffed
+        .or(declared_ct)
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    if !master_allowed(&content_type) {
+        return Err(AppError::Forbidden);
+    }
+    if !claims.ct.is_empty() && !claims.ct.iter().any(|c| c == &content_type) {
+        return Err(AppError::BadRequest(format!(
+            "content type '{content_type}' not allowed by policy"
+        )));
+    }
+
+    // 3. Choose the key and stream head + remainder to the backend.
+    let file_id = Uuid::now_v7();
+    let ext = ext_for(&content_type, file_name.as_deref());
+    let id_hex = file_id.simple().to_string();
+    let now = Utc::now();
+    let stored_key = format!(
+        "{}/{}/{}/{:02}/{}/{}.{}",
+        tenant_id,
+        claims.cat,
+        now.year(),
+        now.month(),
+        &id_hex[0..2],
+        id_hex,
+        ext
+    );
+
+    let mut writer = blob.open_writer(&stored_key).await?;
+    let mut hasher = Sha256::new();
+    let mut count: u64 = head.len() as u64;
+    hasher.update(&head);
+    if let Err(err) = writer.write(Bytes::from(head)).await {
+        let _ = writer.abort().await;
+        return Err(err);
+    }
+
+    loop {
+        match field.chunk().await {
+            Ok(Some(chunk)) => {
+                count += chunk.len() as u64;
+                if count > max {
+                    let _ = writer.abort().await;
+                    return Err(AppError::PayloadTooLarge);
+                }
+                hasher.update(&chunk);
+                if let Err(err) = writer.write(chunk).await {
+                    let _ = writer.abort().await;
+                    return Err(err);
+                }
+            }
+            Ok(None) => break,
+            Err(err) => {
+                let _ = writer.abort().await;
+                return Err(AppError::BadRequest(err.to_string()));
+            }
+        }
+    }
+    if let Err(err) = writer.commit().await {
+        let _ = writer.abort().await;
+        return Err(err);
+    }
+
+    Ok(Staged {
+        file_id,
+        stored_key,
+        content_type,
+        size: count as i64,
+        checksum: hex::encode(hasher.finalize()),
+        file_name,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -300,7 +383,7 @@ pub async fn download(
     let file = find_file(&state.db, tenant_id, &file_ref)
         .await?
         .ok_or(AppError::NotFound)?;
-    let data = state.blob.get(&file.stored_key).await?;
+    let stream = state.blob.open_reader(&file.stored_key).await?;
 
     // best-effort egress metering
     let _ = sqlx::query("INSERT INTO usage_events (tenant_id, op, bytes) VALUES ($1, 'egress', $2)")
@@ -318,8 +401,9 @@ pub async fn download(
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, file.content_type)
+        .header(header::CONTENT_LENGTH, file.size_bytes.to_string())
         .header(header::CONTENT_DISPOSITION, content_disposition)
-        .body(Body::from(data))
+        .body(Body::from_stream(stream))
         .map_err(|err| AppError::Internal(err.to_string()))
 }
 
@@ -347,11 +431,12 @@ pub async fn content(
     let file = find_file(&state.db, ctx.tenant.id, &file_ref)
         .await?
         .ok_or(AppError::NotFound)?;
-    let data = state.blob.get(&file.stored_key).await?;
+    let stream = state.blob.open_reader(&file.stored_key).await?;
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, file.content_type)
-        .body(Body::from(data))
+        .header(header::CONTENT_LENGTH, file.size_bytes.to_string())
+        .body(Body::from_stream(stream))
         .map_err(|err| AppError::Internal(err.to_string()))
 }
 

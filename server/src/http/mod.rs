@@ -5,6 +5,7 @@
 //!   /v1/*           — public/edge: grant-authorized upload, signed download
 //!   /health         — liveness
 
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use serde_json::{json, Value};
@@ -44,7 +45,12 @@ fn internal_routes() -> Router<AppState> {
 fn public_routes() -> Router<AppState> {
     Router::new()
         .route("/health", get(health))
-        .route("/upload", post(files::upload))
+        // disable axum's body cap on uploads; size is enforced in-stream
+        // (grant ∩ global cap) by the upload handler.
+        .route(
+            "/upload",
+            post(files::upload).layer(DefaultBodyLimit::disable()),
+        )
         .route("/files/{file_ref}", get(files::download))
         // edge routes are browser-facing
         .layer(CorsLayer::permissive())

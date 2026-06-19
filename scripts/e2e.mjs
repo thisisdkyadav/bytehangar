@@ -47,6 +47,7 @@ async function main() {
   // --- catalog (idempotent) ---
   const policies = [
     { key: "img", category: "images", maxSizeBytes: 1024 * 1024, allowContentTypes: ["image/png"] },
+    { key: "blob", category: "blobs", maxSizeBytes: 50 * 1024 * 1024, allowContentTypes: [] },
   ];
   const c1 = await storage.registerCatalog(policies);
   check("registerCatalog changed first time", c1.changed === true && c1.version >= 1);
@@ -102,6 +103,22 @@ async function main() {
   // --- usage reflects stored objects ---
   const usage = await storage.getUsage();
   check("usage objectCount >= 1", usage.objectCount >= 1 && usage.usedBytes > 0);
+
+  // --- large file: exercises streaming + S3 multipart upload (>5 MiB) ---
+  const big = Buffer.alloc(6 * 1024 * 1024);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(big); // png signature
+  const grantBig = await storage.createGrant("blob");
+  const upBig = await client.upload(grantBig.token, new Blob([big], { type: "image/png" }), {
+    fileName: "big.png",
+  });
+  check("large upload size matches (6 MiB)", upBig.size === big.length);
+  const signedBig = await storage.signDownload(upBig.fileRef);
+  const bigUrl = signedBig.url.startsWith("http") ? signedBig.url : BASE + signedBig.url;
+  const dlBig = Buffer.from(await (await fetch(bigUrl)).arrayBuffer());
+  check(
+    "large download byte-exact (6 MiB)",
+    dlBig.length === big.length && Buffer.compare(dlBig, big) === 0,
+  );
 
   // --- quota enforcement ---
   await admin.setQuota(tenant.id, 1); // 1 byte: any further upload exceeds
