@@ -7,6 +7,8 @@
 // enforcement -> usage -> quota enforcement -> delete. Backend-agnostic (works
 // against the local-disk or S3 driver, whichever the server is configured with).
 
+import http from "node:http";
+
 import { ByteHangarServer } from "../sdk/dist/server/index.js";
 import { ByteHangarClient } from "../sdk/dist/client/index.js";
 
@@ -53,6 +55,7 @@ async function main() {
   const policies = [
     { key: "img", category: "images", maxSizeBytes: 1024 * 1024, allowContentTypes: ["image/png"] },
     { key: "blob", category: "blobs", maxSizeBytes: 50 * 1024 * 1024, allowContentTypes: [] },
+    { key: "pub", category: "public-assets", maxSizeBytes: 1024 * 1024, allowContentTypes: ["image/png"], visibility: "public" },
   ];
   const c1 = await storage.registerCatalog(policies);
   check("registerCatalog changed first time", c1.changed === true && c1.version >= 1);
@@ -138,6 +141,44 @@ async function main() {
     "listTenants includes our tenant with usage",
     tenantList.items.some((t) => t.id === tenant.id && t.objectCount >= 1),
   );
+
+  // --- visibility: public files served without a signature ---
+  const pngPub = pngBytes(7);
+  const grantPub = await storage.createGrant("pub");
+  const upPub = await client.upload(grantPub.token, new Blob([pngPub], { type: "image/png" }), {
+    fileName: "pub.png",
+  });
+  const pubRes = await fetch(client.fileUrl(tenant.id, upPub.fileRef));
+  check("public file served without a signature", pubRes.status === 200);
+  check(
+    "public file bytes match",
+    Buffer.compare(Buffer.from(await pubRes.arrayBuffer()), pngPub) === 0,
+  );
+
+  // private file (img policy) without a signature is denied
+  const privRes = await fetch(client.fileUrl(tenant.id, up2.fileRef));
+  check("private file denied without signature", privRes.status === 401);
+
+  // --- private file via app-callback download auth ---
+  const cbServer = http.createServer((req, res) => {
+    res.statusCode = req.headers["authorization"] === "Bearer good" ? 200 : 403;
+    res.end();
+  });
+  await new Promise((resolve) => cbServer.listen(0, "127.0.0.1", resolve));
+  const cbPort = cbServer.address().port;
+  await admin.setDownloadAuthUrl(tenant.id, `http://127.0.0.1:${cbPort}/auth`);
+
+  const grantCb = await storage.createGrant("img");
+  const upCb = await client.upload(grantCb.token, new Blob([pngBytes(8)], { type: "image/png" }), {
+    fileName: "cb.png",
+  });
+  const cbUrl = client.fileUrl(tenant.id, upCb.fileRef);
+  const okRes = await fetch(cbUrl, { headers: { authorization: "Bearer good" } });
+  check("callback authorizes private download (good token)", okRes.status === 200);
+  const denyRes = await fetch(cbUrl, { headers: { authorization: "Bearer bad" } });
+  check("callback denies private download (bad token)", denyRes.status === 401);
+  await admin.setDownloadAuthUrl(tenant.id, null);
+  cbServer.close();
 
   // --- quota enforcement ---
   await admin.setQuota(tenant.id, 1); // 1 byte: any further upload exceeds

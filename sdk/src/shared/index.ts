@@ -11,6 +11,8 @@ export interface PolicyDefinition {
   maxSizeBytes: number;
   /** Allowed content types; empty/omitted => any type the master allowlist permits. */
   allowContentTypes?: string[];
+  /** "public" (served without a signature) or "private" (default). */
+  visibility?: "public" | "private";
 }
 
 export interface RegisterCatalogResult {
@@ -45,6 +47,7 @@ export interface FileRecord {
   contentType: string;
   sizeBytes: number;
   checksumSha256: string;
+  visibility: string;
   createdAt: string;
   deletedAt: string | null;
 }

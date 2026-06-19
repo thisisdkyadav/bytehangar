@@ -31,6 +31,15 @@ export class ByteHangarClient {
   }
 
   /**
+   * Build the direct file URL: `{base}/v1/files/{ref}?t={tenant}`. Works as-is for
+   * PUBLIC files; for private files the request must also carry a signature (see
+   * server `signDownload`) or credentials the tenant's download-auth callback accepts.
+   */
+  fileUrl(tenantId: string, fileRef: string): string {
+    return `${this.baseUrl}/v1/files/${encodeURIComponent(fileRef)}?t=${encodeURIComponent(tenantId)}`;
+  }
+
+  /**
    * Upload a file directly to the storage server using a grant token obtained
    * from your backend. The grant encodes the policy, size cap, and expiry — the
    * client cannot exceed them.

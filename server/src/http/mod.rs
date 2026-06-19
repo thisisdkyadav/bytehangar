@@ -36,6 +36,7 @@ fn internal_routes() -> Router<AppState> {
         .route("/tenants", post(tenants::create_tenant).get(tenants::list_tenants))
         .route("/tenants/{id}/keys", post(tenants::create_key))
         .route("/tenants/{id}/quota", patch(tenants::set_quota))
+        .route("/tenants/{id}/download-auth", patch(tenants::set_download_auth))
         .route("/gc", post(gc::gc_handler))
         // tenant control plane (tenant key)
         .route("/catalog", put(catalog::register_catalog))

@@ -24,6 +24,7 @@ pub struct Tenant {
     pub signing_secret_enc: String,
     pub quota_bytes: i64,
     pub created_at: DateTime<Utc>,
+    pub download_auth_url: Option<String>,
 }
 
 impl Tenant {
@@ -34,7 +35,7 @@ impl Tenant {
 }
 
 const TENANT_COLUMNS: &str =
-    "id, name, status, signing_secret_enc, quota_bytes, created_at";
+    "id, name, status, signing_secret_enc, quota_bytes, created_at, download_auth_url";
 
 pub async fn find_tenant_by_id(db: &PgPool, id: Uuid) -> AppResult<Option<Tenant>> {
     let query = format!("SELECT {TENANT_COLUMNS} FROM tenants WHERE id = $1");
@@ -47,7 +48,7 @@ pub async fn find_tenant_by_id(db: &PgPool, id: Uuid) -> AppResult<Option<Tenant
 
 pub async fn find_tenant_by_key_hash(db: &PgPool, key_hash: &str) -> AppResult<Option<Tenant>> {
     let tenant = sqlx::query_as::<_, Tenant>(
-        "SELECT t.id, t.name, t.status, t.signing_secret_enc, t.quota_bytes, t.created_at \
+        "SELECT t.id, t.name, t.status, t.signing_secret_enc, t.quota_bytes, t.created_at, t.download_auth_url \
          FROM api_keys k JOIN tenants t ON t.id = k.tenant_id \
          WHERE k.key_hash = $1 AND k.revoked_at IS NULL",
     )
@@ -219,6 +220,32 @@ pub async fn set_quota(
 ) -> AppResult<Json<serde_json::Value>> {
     let affected = sqlx::query("UPDATE tenants SET quota_bytes = $1 WHERE id = $2")
         .bind(req.quota_bytes)
+        .bind(tenant_id)
+        .execute(&state.db)
+        .await?
+        .rows_affected();
+    if affected == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(serde_json::json!({ "success": true })))
+}
+
+#[derive(Deserialize)]
+pub struct SetDownloadAuthRequest {
+    /// Callback URL for private-file download authorization. null/omitted clears it.
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+/// Set (or clear) a tenant's private-download authorization callback (admin).
+pub async fn set_download_auth(
+    _admin: AdminAuth,
+    State(state): State<AppState>,
+    Path(tenant_id): Path<Uuid>,
+    Json(req): Json<SetDownloadAuthRequest>,
+) -> AppResult<Json<serde_json::Value>> {
+    let affected = sqlx::query("UPDATE tenants SET download_auth_url = $1 WHERE id = $2")
+        .bind(req.url.as_deref())
         .bind(tenant_id)
         .execute(&state.db)
         .await?

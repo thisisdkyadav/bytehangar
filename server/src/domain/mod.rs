@@ -29,4 +29,6 @@ pub struct GrantClaims {
     pub n: String,
     /// expiry (unix seconds)
     pub exp: i64,
+    /// visibility: "public" | "private"
+    pub vis: String,
 }

@@ -56,6 +56,7 @@ export class ByteHangarServer {
           category: p.category,
           max_size_bytes: p.maxSizeBytes,
           allow_content_types: p.allowContentTypes ?? [],
+          visibility: p.visibility,
         })),
       },
     });
@@ -172,6 +173,14 @@ export class ByteHangarServer {
     });
   }
 
+  /** Set (or clear, with null) a tenant's private-download authorization callback. */
+  async setDownloadAuthUrl(tenantId: string, url: string | null): Promise<void> {
+    await this.request("PATCH", `/internal/v1/tenants/${tenantId}/download-auth`, {
+      auth: "admin",
+      body: { url },
+    });
+  }
+
   /** List tenants with their usage (admin). */
   async listTenants(opts: { limit?: number; offset?: number } = {}): Promise<Page<TenantSummary>> {
     const data = await this.request<any>(
@@ -259,6 +268,7 @@ function toFileRecord(d: any): FileRecord {
     contentType: d.content_type,
     sizeBytes: d.size_bytes,
     checksumSha256: d.checksum_sha256,
+    visibility: d.visibility,
     createdAt: d.created_at,
     deletedAt: d.deleted_at,
   };

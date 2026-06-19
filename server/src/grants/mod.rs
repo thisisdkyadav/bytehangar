@@ -66,6 +66,7 @@ pub async fn mint_grant(
         ct: policy.allow_content_types.clone(),
         n: nonce.to_string(),
         exp: expires_at.timestamp(),
+        vis: policy.visibility.clone(),
     };
     let token = crypto::encode_grant(ctx.tenant.signing_secret(), &claims)?;
 

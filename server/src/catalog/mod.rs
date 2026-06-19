@@ -19,11 +19,12 @@ pub struct PolicyRow {
     pub category: String,
     pub max_size_bytes: i64,
     pub allow_content_types: Vec<String>,
+    pub visibility: String,
 }
 
 pub async fn find_policy(db: &PgPool, tenant_id: Uuid, key: &str) -> AppResult<Option<PolicyRow>> {
     let row = sqlx::query_as::<_, PolicyRow>(
-        "SELECT key, category, max_size_bytes, allow_content_types \
+        "SELECT key, category, max_size_bytes, allow_content_types, visibility \
          FROM policies WHERE tenant_id = $1 AND key = $2",
     )
     .bind(tenant_id)
@@ -40,6 +41,9 @@ pub struct PolicyInput {
     pub max_size_bytes: i64,
     #[serde(default)]
     pub allow_content_types: Vec<String>,
+    /// "public" | "private" (default "private").
+    #[serde(default)]
+    pub visibility: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -91,6 +95,14 @@ pub async fn register_catalog(
                 policy.key, state.config.max_upload_bytes
             )));
         }
+        if let Some(visibility) = &policy.visibility {
+            if visibility != "public" && visibility != "private" {
+                return Err(AppError::BadRequest(format!(
+                    "visibility for '{}' must be 'public' or 'private'",
+                    policy.key
+                )));
+            }
+        }
     }
 
     policies.sort_by(|a, b| a.key.cmp(&b.key));
@@ -131,14 +143,15 @@ pub async fn register_catalog(
         .await?;
     for policy in &policies {
         sqlx::query(
-            "INSERT INTO policies (tenant_id, key, category, max_size_bytes, allow_content_types) \
-             VALUES ($1, $2, $3, $4, $5)",
+            "INSERT INTO policies (tenant_id, key, category, max_size_bytes, allow_content_types, visibility) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
         )
         .bind(tenant_id)
         .bind(&policy.key)
         .bind(&policy.category)
         .bind(policy.max_size_bytes)
         .bind(&policy.allow_content_types)
+        .bind(policy.visibility.as_deref().unwrap_or("private"))
         .execute(&mut *tx)
         .await?;
     }
@@ -163,11 +176,12 @@ fn catalog_hash(policies: &[PolicyInput]) -> String {
         let mut content_types = policy.allow_content_types.clone();
         content_types.sort();
         parts.push_str(&format!(
-            "{}|{}|{}|{}\n",
+            "{}|{}|{}|{}|{}\n",
             policy.key,
             policy.category,
             policy.max_size_bytes,
-            content_types.join(",")
+            content_types.join(","),
+            policy.visibility.as_deref().unwrap_or("private")
         ));
     }
     crypto::sha256_hex(parts.as_bytes())

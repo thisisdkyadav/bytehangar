@@ -8,7 +8,7 @@
 use axum::body::Body;
 use axum::extract::multipart::Field;
 use axum::extract::{Multipart, Path, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::Response;
 use axum::Json;
 use bytes::Bytes;
@@ -69,12 +69,13 @@ pub struct FileRecord {
     pub content_type: String,
     pub size_bytes: i64,
     pub checksum_sha256: String,
+    pub visibility: String,
     pub created_at: DateTime<Utc>,
     pub deleted_at: Option<DateTime<Utc>>,
 }
 
 const FILE_COLUMNS: &str = "id, tenant_id, file_ref, policy_key, category, original_name, \
-     stored_key, content_type, size_bytes, checksum_sha256, created_at, deleted_at";
+     stored_key, content_type, size_bytes, checksum_sha256, visibility, created_at, deleted_at";
 
 async fn find_file(db: &PgPool, tenant_id: Uuid, file_ref: &str) -> AppResult<Option<FileRecord>> {
     let query = format!(
@@ -195,8 +196,8 @@ pub async fn upload(
 
         sqlx::query(
             "INSERT INTO files \
-             (id, tenant_id, file_ref, policy_key, category, original_name, stored_key, content_type, size_bytes, checksum_sha256) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+             (id, tenant_id, file_ref, policy_key, category, original_name, stored_key, content_type, size_bytes, checksum_sha256, visibility) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
         )
         .bind(staged.file_id)
         .bind(tenant_id)
@@ -208,6 +209,7 @@ pub async fn upload(
         .bind(&content_type)
         .bind(size)
         .bind(&staged.checksum)
+        .bind(&claims.vis)
         .execute(&mut *tx)
         .await?;
 
@@ -352,8 +354,10 @@ async fn stream_field(
 #[derive(Deserialize)]
 pub struct DownloadQuery {
     t: String,
-    exp: i64,
-    sig: String,
+    #[serde(default)]
+    exp: Option<i64>,
+    #[serde(default)]
+    sig: Option<String>,
     #[serde(default)]
     disposition: Option<String>,
 }
@@ -362,27 +366,37 @@ pub async fn download(
     State(state): State<AppState>,
     Path(file_ref): Path<String>,
     Query(query): Query<DownloadQuery>,
+    headers: HeaderMap,
 ) -> AppResult<Response> {
     let tenant_id = Uuid::parse_str(&query.t).map_err(|_| AppError::Unauthorized)?;
     let tenant = tenants::find_tenant_by_id(&state.db, tenant_id)
         .await?
         .ok_or(AppError::Unauthorized)?;
-    if query.exp < Utc::now().timestamp() {
-        return Err(AppError::Unauthorized);
-    }
-    if !crypto::verify_download(
-        tenant.signing_secret(),
-        &query.t,
-        &file_ref,
-        query.exp,
-        &query.sig,
-    ) {
-        return Err(AppError::Unauthorized);
-    }
-
     let file = find_file(&state.db, tenant_id, &file_ref)
         .await?
         .ok_or(AppError::NotFound)?;
+
+    // Public files need no authorization. Private files need a valid signed URL
+    // or, failing that, approval from the tenant's download-auth callback.
+    if file.visibility != "public" {
+        let mut authorized = false;
+        if let (Some(exp), Some(sig)) = (query.exp, query.sig.as_ref()) {
+            if exp >= Utc::now().timestamp()
+                && crypto::verify_download(tenant.signing_secret(), &query.t, &file_ref, exp, sig)
+            {
+                authorized = true;
+            }
+        }
+        if !authorized {
+            if let Some(callback) = tenant.download_auth_url.as_deref() {
+                authorized = authorize_via_callback(callback, &headers, tenant_id, &file).await;
+            }
+        }
+        if !authorized {
+            return Err(AppError::Unauthorized);
+        }
+    }
+
     let stream = state.blob.open_reader(&file.stored_key).await?;
 
     // best-effort egress metering
@@ -405,6 +419,34 @@ pub async fn download(
         .header(header::CONTENT_DISPOSITION, content_disposition)
         .body(Body::from_stream(stream))
         .map_err(|err| AppError::Internal(err.to_string()))
+}
+
+/// Ask the tenant's callback whether this request may download a private file.
+/// Forwards the requester's Authorization/Cookie; a 2xx response authorizes.
+async fn authorize_via_callback(
+    callback: &str,
+    headers: &HeaderMap,
+    tenant_id: Uuid,
+    file: &FileRecord,
+) -> bool {
+    let tenant = tenant_id.to_string();
+    let mut request = reqwest::Client::new()
+        .get(callback)
+        .timeout(std::time::Duration::from_secs(5))
+        .query(&[
+            ("file_ref", file.file_ref.as_str()),
+            ("category", file.category.as_str()),
+            ("tenant", tenant.as_str()),
+        ]);
+    for name in ["authorization", "cookie"] {
+        if let Some(value) = headers.get(name).and_then(|value| value.to_str().ok()) {
+            request = request.header(name, value);
+        }
+    }
+    match request.send().await {
+        Ok(response) => response.status().is_success(),
+        Err(_) => false,
+    }
 }
 
 // ---------------------------------------------------------------------------
