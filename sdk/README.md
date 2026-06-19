@@ -61,6 +61,37 @@ const { url } = await storage.signDownload(fileRef, { expiresInSeconds: 600 });
 // redirect the browser to `url`, or return it as an <img src>
 ```
 
+## React (`@bytehangar/sdk/react`)
+
+A hook + drop-in button built on the client. `getGrant` calls your own backend
+(which mints the grant with `@bytehangar/sdk/server`).
+
+```tsx
+import { UploadButton, useByteHangarUpload } from "@bytehangar/sdk/react";
+
+const getGrant = async () =>
+  (await (await fetch("/uploads/profile", { method: "POST" })).json()).token;
+
+// Drop-in button:
+<UploadButton
+  baseUrl="https://files.example.com"
+  getGrant={getGrant}
+  accept="image/*"
+  onComplete={(r) => console.log(r.fileRef)}
+/>;
+
+// Or the hook for custom UI:
+function Avatar() {
+  const { upload, status, progress } = useByteHangarUpload({
+    baseUrl: "https://files.example.com",
+    getGrant,
+  });
+  return <input type="file" onChange={(e) => e.target.files?.[0] && upload(e.target.files[0])} />;
+}
+```
+
+React is an optional peer dependency — only needed if you import `/react`.
+
 ## Notes
 
 - Success responses are the raw resource JSON; errors are `{ success:false, message, ... }` and surface as a thrown `ByteHangarError` (with `.status`).
