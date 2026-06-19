@@ -181,6 +181,21 @@ export class ByteHangarServer {
     });
   }
 
+  /**
+   * Set (or clear, with null) a tenant's event webhook. Returns the signing
+   * secret (store it to verify the `x-bytehangar-signature` header).
+   */
+  async setWebhook(
+    tenantId: string,
+    url: string | null,
+    secret?: string,
+  ): Promise<{ url: string | null; secret: string | null }> {
+    return this.request("PATCH", `/internal/v1/tenants/${tenantId}/webhook`, {
+      auth: "admin",
+      body: { url, secret },
+    });
+  }
+
   /** List tenants with their usage (admin). */
   async listTenants(opts: { limit?: number; offset?: number } = {}): Promise<Page<TenantSummary>> {
     const data = await this.request<any>(

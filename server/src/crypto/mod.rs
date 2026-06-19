@@ -44,6 +44,13 @@ fn hmac_sign(secret: &[u8], message: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
 }
 
+/// Hex-encoded HMAC-SHA256 (used for webhook body signatures: `sha256=<hex>`).
+pub fn hmac_hex(secret: &str, message: &[u8]) -> String {
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
+    mac.update(message);
+    hex::encode(mac.finalize().into_bytes())
+}
+
 fn hmac_verify(secret: &[u8], message: &[u8], signature: &str) -> bool {
     let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key length");
     mac.update(message);

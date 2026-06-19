@@ -16,6 +16,7 @@ mod http;
 mod state;
 mod tenants;
 mod usage;
+mod webhooks;
 
 use std::future::IntoFuture;
 use std::sync::Arc;

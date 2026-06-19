@@ -7,6 +7,7 @@
 // enforcement -> usage -> quota enforcement -> delete. Backend-agnostic (works
 // against the local-disk or S3 driver, whichever the server is configured with).
 
+import crypto from "node:crypto";
 import http from "node:http";
 
 import { ByteHangarServer } from "../sdk/dist/server/index.js";
@@ -179,6 +180,50 @@ async function main() {
   check("callback denies private download (bad token)", denyRes.status === 401);
   await admin.setDownloadAuthUrl(tenant.id, null);
   cbServer.close();
+
+  // --- webhooks: file.uploaded / file.deleted, signed ---
+  let webhookSecret = "";
+  let resolveUploaded;
+  let resolveDeleted;
+  const uploadedEvent = new Promise((r) => (resolveUploaded = r));
+  const deletedEvent = new Promise((r) => (resolveDeleted = r));
+  const hookServer = http.createServer((req, res) => {
+    let raw = "";
+    req.on("data", (c) => (raw += c));
+    req.on("end", () => {
+      const event = req.headers["x-bytehangar-event"];
+      const expected = "sha256=" + crypto.createHmac("sha256", webhookSecret).update(raw).digest("hex");
+      const valid = req.headers["x-bytehangar-signature"] === expected;
+      const parsed = JSON.parse(raw || "{}");
+      if (event === "file.uploaded") resolveUploaded({ valid, parsed });
+      if (event === "file.deleted") resolveDeleted({ valid, parsed });
+      res.statusCode = 200;
+      res.end();
+    });
+  });
+  await new Promise((r) => hookServer.listen(0, "127.0.0.1", r));
+  const hookPort = hookServer.address().port;
+  const wh = await admin.setWebhook(tenant.id, `http://127.0.0.1:${hookPort}/hook`);
+  webhookSecret = wh.secret;
+  check("setWebhook returns a signing secret", typeof webhookSecret === "string" && webhookSecret.length > 0);
+
+  const timeout = (ms) => new Promise((r) => setTimeout(() => r(null), ms));
+  const grantWh = await storage.createGrant("img");
+  const upWh = await client.upload(grantWh.token, new Blob([pngBytes(9)], { type: "image/png" }), {
+    fileName: "wh.png",
+  });
+  const uEvt = await Promise.race([uploadedEvent, timeout(4000)]);
+  check(
+    "webhook file.uploaded delivered + signature valid",
+    !!uEvt && uEvt.valid && uEvt.parsed.file_ref === upWh.fileRef,
+  );
+
+  await storage.deleteFile(upWh.fileRef);
+  const dEvt = await Promise.race([deletedEvent, timeout(4000)]);
+  check("webhook file.deleted delivered", !!dEvt && dEvt.parsed.file_ref === upWh.fileRef);
+
+  await admin.setWebhook(tenant.id, null);
+  hookServer.close();
 
   // --- quota enforcement ---
   await admin.setQuota(tenant.id, 1); // 1 byte: any further upload exceeds

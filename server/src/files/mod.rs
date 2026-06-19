@@ -24,7 +24,7 @@ use crate::crypto;
 use crate::domain::GrantClaims;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
-use crate::{tenants, usage};
+use crate::{tenants, usage, webhooks};
 
 /// Inviolable master content-type allowlist (no executables ever land).
 const MASTER_CONTENT_TYPES: &[&str] = &[
@@ -225,6 +225,19 @@ pub async fn upload(
         }
         return Err(err);
     }
+
+    webhooks::dispatch(
+        &tenant,
+        webhooks::EVENT_UPLOADED,
+        serde_json::json!({
+            "event": webhooks::EVENT_UPLOADED,
+            "tenant_id": tenant_id,
+            "file_ref": file_ref,
+            "category": claims.cat,
+            "content_type": content_type,
+            "size_bytes": size,
+        }),
+    );
 
     Ok(Json(UploadResponse {
         file_ref,
@@ -622,5 +635,16 @@ pub async fn delete_file(
     let size = size.ok_or(AppError::NotFound)?;
     usage::record_delete(&mut tx, ctx.tenant.id, size).await?;
     tx.commit().await?;
+
+    webhooks::dispatch(
+        &ctx.tenant,
+        webhooks::EVENT_DELETED,
+        serde_json::json!({
+            "event": webhooks::EVENT_DELETED,
+            "tenant_id": ctx.tenant.id,
+            "file_ref": file_ref,
+        }),
+    );
+
     Ok(Json(serde_json::json!({ "success": true })))
 }

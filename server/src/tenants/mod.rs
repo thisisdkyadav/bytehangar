@@ -25,6 +25,8 @@ pub struct Tenant {
     pub quota_bytes: i64,
     pub created_at: DateTime<Utc>,
     pub download_auth_url: Option<String>,
+    pub webhook_url: Option<String>,
+    pub webhook_secret: Option<String>,
 }
 
 impl Tenant {
@@ -34,8 +36,8 @@ impl Tenant {
     }
 }
 
-const TENANT_COLUMNS: &str =
-    "id, name, status, signing_secret_enc, quota_bytes, created_at, download_auth_url";
+const TENANT_COLUMNS: &str = "id, name, status, signing_secret_enc, quota_bytes, created_at, \
+     download_auth_url, webhook_url, webhook_secret";
 
 pub async fn find_tenant_by_id(db: &PgPool, id: Uuid) -> AppResult<Option<Tenant>> {
     let query = format!("SELECT {TENANT_COLUMNS} FROM tenants WHERE id = $1");
@@ -48,7 +50,8 @@ pub async fn find_tenant_by_id(db: &PgPool, id: Uuid) -> AppResult<Option<Tenant
 
 pub async fn find_tenant_by_key_hash(db: &PgPool, key_hash: &str) -> AppResult<Option<Tenant>> {
     let tenant = sqlx::query_as::<_, Tenant>(
-        "SELECT t.id, t.name, t.status, t.signing_secret_enc, t.quota_bytes, t.created_at, t.download_auth_url \
+        "SELECT t.id, t.name, t.status, t.signing_secret_enc, t.quota_bytes, t.created_at, \
+                t.download_auth_url, t.webhook_url, t.webhook_secret \
          FROM api_keys k JOIN tenants t ON t.id = k.tenant_id \
          WHERE k.key_hash = $1 AND k.revoked_at IS NULL",
     )
@@ -254,4 +257,45 @@ pub async fn set_download_auth(
         return Err(AppError::NotFound);
     }
     Ok(Json(serde_json::json!({ "success": true })))
+}
+
+#[derive(Deserialize)]
+pub struct SetWebhookRequest {
+    /// Event webhook URL. null/omitted clears the webhook.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Signing secret. If omitted while setting a url, one is generated.
+    #[serde(default)]
+    pub secret: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct SetWebhookResponse {
+    pub url: Option<String>,
+    /// The signing secret — store it to verify `x-bytehangar-signature`.
+    pub secret: Option<String>,
+}
+
+/// Set (or clear) a tenant's event webhook (admin). Returns the signing secret.
+pub async fn set_webhook(
+    _admin: AdminAuth,
+    State(state): State<AppState>,
+    Path(tenant_id): Path<Uuid>,
+    Json(req): Json<SetWebhookRequest>,
+) -> AppResult<Json<SetWebhookResponse>> {
+    let (url, secret) = match req.url {
+        Some(url) => (Some(url), Some(req.secret.unwrap_or_else(|| crypto::random_token(32)))),
+        None => (None, None),
+    };
+    let affected = sqlx::query("UPDATE tenants SET webhook_url = $1, webhook_secret = $2 WHERE id = $3")
+        .bind(url.as_deref())
+        .bind(secret.as_deref())
+        .bind(tenant_id)
+        .execute(&state.db)
+        .await?
+        .rows_affected();
+    if affected == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(SetWebhookResponse { url, secret }))
 }
