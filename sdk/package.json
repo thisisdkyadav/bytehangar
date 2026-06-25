@@ -1,6 +1,6 @@
 {
   "name": "@bytehangar/sdk",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "ByteHangar SDK — server (grants, catalog, files) + browser client (direct upload, signed downloads) + React adapter",
   "license": "MIT",
   "type": "module",
