@@ -13,4 +13,6 @@ pub struct AppState {
     pub db: PgPool,
     pub blob: Arc<dyn BlobBackend>,
     pub secrets: Arc<Secrets>,
+    /// Shared outbound HTTP client (webhooks, download-auth callbacks).
+    pub http_client: reqwest::Client,
 }

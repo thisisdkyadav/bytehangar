@@ -2,7 +2,7 @@
   "name": "@bytehangar/sdk",
   "version": "0.1.0",
   "description": "ByteHangar SDK — server (grants, catalog, files) + browser client (direct upload, signed downloads) + React adapter",
-  "license": "Apache-2.0",
+  "license": "MIT",
   "type": "module",
   "exports": {
     "./server": {

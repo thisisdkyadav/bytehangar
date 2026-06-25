@@ -42,6 +42,33 @@ fn master_allowed(content_type: &str) -> bool {
     MASTER_CONTENT_TYPES.contains(&content_type)
 }
 
+/// Build a safe Content-Disposition value. The filename is user-controlled, so we
+/// emit a sanitized ASCII `filename=` (no control chars / quotes / backslashes —
+/// preventing header injection) plus an RFC 5987 `filename*` for full fidelity.
+fn content_disposition(disposition: &str, name: &str) -> String {
+    let ascii: String = name
+        .chars()
+        .map(|c| {
+            if c.is_control() || c == '"' || c == '\\' || !c.is_ascii() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let ascii = if ascii.trim().is_empty() { "download".to_string() } else { ascii };
+
+    let mut encoded = String::new();
+    for &byte in name.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    format!("{disposition}; filename=\"{ascii}\"; filename*=UTF-8''{encoded}")
+}
+
 fn ext_for(content_type: &str, original_name: Option<&str>) -> String {
     match content_type {
         "application/pdf" => "pdf".to_string(),
@@ -227,6 +254,7 @@ pub async fn upload(
     }
 
     webhooks::dispatch(
+        state.http_client.clone(),
         &tenant,
         webhooks::EVENT_UPLOADED,
         serde_json::json!({
@@ -402,7 +430,9 @@ pub async fn download(
         }
         if !authorized {
             if let Some(callback) = tenant.download_auth_url.as_deref() {
-                authorized = authorize_via_callback(callback, &headers, tenant_id, &file).await;
+                authorized =
+                    authorize_via_callback(&state.http_client, callback, &headers, tenant_id, &file)
+                        .await;
             }
         }
         if !authorized {
@@ -423,13 +453,15 @@ pub async fn download(
         Some("attachment") => "attachment",
         _ => "inline",
     };
-    let content_disposition = format!("{}; filename=\"{}\"", disposition, file.original_name);
 
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, file.content_type)
         .header(header::CONTENT_LENGTH, file.size_bytes.to_string())
-        .header(header::CONTENT_DISPOSITION, content_disposition)
+        .header(
+            header::CONTENT_DISPOSITION,
+            content_disposition(disposition, &file.original_name),
+        )
         .body(Body::from_stream(stream))
         .map_err(|err| AppError::Internal(err.to_string()))
 }
@@ -437,13 +469,14 @@ pub async fn download(
 /// Ask the tenant's callback whether this request may download a private file.
 /// Forwards the requester's Authorization/Cookie; a 2xx response authorizes.
 async fn authorize_via_callback(
+    client: &reqwest::Client,
     callback: &str,
     headers: &HeaderMap,
     tenant_id: Uuid,
     file: &FileRecord,
 ) -> bool {
     let tenant = tenant_id.to_string();
-    let mut request = reqwest::Client::new()
+    let mut request = client
         .get(callback)
         .timeout(std::time::Duration::from_secs(5))
         .query(&[
@@ -637,6 +670,7 @@ pub async fn delete_file(
     tx.commit().await?;
 
     webhooks::dispatch(
+        state.http_client.clone(),
         &ctx.tenant,
         webhooks::EVENT_DELETED,
         serde_json::json!({

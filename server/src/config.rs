@@ -44,10 +44,27 @@ pub struct Config {
     pub internal_bind: String,
     /// Master key for encrypting tenant secrets at rest. Empty => stored as plaintext.
     pub master_key: String,
+    /// Deployment environment ("development" | "production"). Tightens defaults.
+    pub environment: String,
+    /// Allowed CORS origins for the public plane. Empty => allow-all (dev only).
+    pub allowed_origins: Vec<String>,
+}
+
+impl Config {
+    pub fn is_production(&self) -> bool {
+        self.environment == "production"
+    }
 }
 
 impl Config {
     pub fn from_env() -> AppResult<Self> {
+        let environment = env_string("APP_ENV", "development");
+        let master_key = env_string("MASTER_KEY", "");
+        if environment == "production" && master_key.is_empty() {
+            return Err(AppError::Internal(
+                "MASTER_KEY is required when APP_ENV=production".into(),
+            ));
+        }
         Ok(Self {
             port: env_parse("PORT", 5100)?,
             internal_port: env_parse("INTERNAL_PORT", 5101)?,
@@ -82,9 +99,19 @@ impl Config {
             public_base_url: env_string("PUBLIC_BASE_URL", ""),
             bind: env_string("BIND_ADDRESS", "0.0.0.0"),
             internal_bind: env_string("INTERNAL_BIND_ADDRESS", "127.0.0.1"),
-            master_key: env_string("MASTER_KEY", ""),
+            master_key,
+            environment,
+            allowed_origins: split_csv(&env_string("ALLOWED_ORIGINS", "")),
         })
     }
+}
+
+fn split_csv(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .collect()
 }
 
 fn env_string(key: &str, default: &str) -> String {

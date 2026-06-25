@@ -8,7 +8,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-export DATABASE_URL="${DATABASE_URL:-postgres://bytehangar:bytehangar@localhost:5432/bytehangar}"
+export DATABASE_URL="${DATABASE_URL:-postgres://bytehangar:bytehangar@localhost:5433/bytehangar}"
 export ADMIN_TOKEN="${ADMIN_TOKEN:-e2e-admin-token}"
 export PORT="${PORT:-5180}"
 export INTERNAL_PORT="${INTERNAL_PORT:-5101}"

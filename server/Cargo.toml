@@ -3,7 +3,7 @@ name = "bytehangar"
 version = "0.1.0"
 edition = "2021"
 description = "Open-source self-hostable file storage — core server"
-license = "Apache-2.0"
+license = "MIT"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }

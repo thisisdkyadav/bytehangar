@@ -6,7 +6,8 @@ services:
       POSTGRES_PASSWORD: bytehangar
       POSTGRES_DB: bytehangar
     ports:
-      - "5432:5432"
+      # Host 5433 to avoid clashing with other local Postgres instances.
+      - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -23,8 +24,9 @@ services:
       MINIO_ROOT_USER: bytehangar
       MINIO_ROOT_PASSWORD: bytehangar-secret
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      # Host 9100/9101 to avoid clashing with other local MinIO instances.
+      - "9100:9000"
+      - "9101:9001"
     volumes:
       - miniodata:/data
 

@@ -6,10 +6,11 @@
 //!   /health         — liveness
 
 use axum::extract::DefaultBodyLimit;
+use axum::http::HeaderValue;
 use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use serde_json::{json, Value};
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{Any, CorsLayer};
 
 use crate::state::AppState;
 use crate::{catalog, files, gc, grants, tenants, usage};
@@ -24,10 +25,24 @@ pub fn internal_router(state: AppState) -> Router {
 
 /// Public/edge plane: browser-facing (grant upload, signed download).
 pub fn public_router(state: AppState) -> Router {
+    let cors = build_cors(&state.config.allowed_origins);
     Router::new()
         .route("/health", get(health))
         .nest("/v1", public_routes())
+        .layer(cors)
         .with_state(state)
+}
+
+/// Restrict CORS to configured origins; allow-all only when none are set (dev).
+fn build_cors(origins: &[String]) -> CorsLayer {
+    if origins.is_empty() {
+        return CorsLayer::permissive();
+    }
+    let parsed: Vec<HeaderValue> = origins.iter().filter_map(|o| o.parse().ok()).collect();
+    CorsLayer::new()
+        .allow_origin(parsed)
+        .allow_methods(Any)
+        .allow_headers(Any)
 }
 
 fn internal_routes() -> Router<AppState> {
@@ -63,8 +78,6 @@ fn public_routes() -> Router<AppState> {
             post(files::upload).layer(DefaultBodyLimit::disable()),
         )
         .route("/files/{file_ref}", get(files::download))
-        // edge routes are browser-facing
-        .layer(CorsLayer::permissive())
 }
 
 async fn health() -> Json<Value> {

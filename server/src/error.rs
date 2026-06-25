@@ -40,6 +40,9 @@ impl AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = self.status();
+        if status.is_server_error() {
+            tracing::error!("{}", self);
+        }
         let body = Json(json!({
             "success": false,
             "message": self.to_string(),

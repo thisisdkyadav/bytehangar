@@ -47,6 +47,13 @@ async fn main() -> anyhow::Result<()> {
     } else {
         tracing::warn!("MASTER_KEY not set — tenant secrets stored as plaintext");
     }
+    if config.is_production() && config.allowed_origins.is_empty() {
+        tracing::warn!("APP_ENV=production but ALLOWED_ORIGINS is empty — CORS allows all origins");
+    }
+
+    let http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()?;
 
     let public_addr = format!("{}:{}", config.bind, config.port);
     let internal_addr = format!("{}:{}", config.internal_bind, config.internal_port);
@@ -56,6 +63,7 @@ async fn main() -> anyhow::Result<()> {
         db,
         blob,
         secrets,
+        http_client,
     };
 
     let public_listener = tokio::net::TcpListener::bind(&public_addr).await?;
@@ -63,9 +71,39 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("public plane on {public_addr}, internal plane on {internal_addr}");
 
     tokio::try_join!(
-        axum::serve(public_listener, http::public_router(state.clone())).into_future(),
-        axum::serve(internal_listener, http::internal_router(state)).into_future(),
+        axum::serve(public_listener, http::public_router(state.clone()))
+            .with_graceful_shutdown(shutdown_signal())
+            .into_future(),
+        axum::serve(internal_listener, http::internal_router(state))
+            .with_graceful_shutdown(shutdown_signal())
+            .into_future(),
     )?;
 
     Ok(())
+}
+
+/// Resolve when the process receives SIGINT (Ctrl-C) or SIGTERM, so in-flight
+/// requests can drain before the server stops.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut stream) => {
+                stream.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+    tracing::info!("shutdown signal received; draining");
 }
