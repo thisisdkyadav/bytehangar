@@ -79,6 +79,15 @@ export interface Page<T> {
   offset: number;
 }
 
+export interface ApiKeySummary {
+  id: string;
+  name: string;
+  role: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+}
+
 /** Error thrown by both SDK halves when the server returns a non-2xx envelope. */
 export class ByteHangarError extends Error {
   readonly status: number;

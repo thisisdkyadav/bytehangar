@@ -226,6 +226,55 @@ pub async fn list_tenants(
     }))
 }
 
+#[derive(Serialize, sqlx::FromRow)]
+pub struct ApiKeySummary {
+    pub id: Uuid,
+    pub name: String,
+    pub role: String,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Serialize)]
+pub struct ApiKeyListResponse {
+    pub keys: Vec<ApiKeySummary>,
+}
+
+/// List a tenant's API keys (never the secret values).
+pub async fn list_keys(
+    _admin: AdminAuth,
+    State(state): State<AppState>,
+    Path(tenant_id): Path<Uuid>,
+) -> AppResult<Json<ApiKeyListResponse>> {
+    let keys = sqlx::query_as::<_, ApiKeySummary>(
+        "SELECT id, name, role, created_at, last_used_at, revoked_at \
+         FROM api_keys WHERE tenant_id = $1 ORDER BY created_at DESC",
+    )
+    .bind(tenant_id)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(ApiKeyListResponse { keys }))
+}
+
+/// Revoke an API key by id (admin).
+pub async fn revoke_key(
+    _admin: AdminAuth,
+    State(state): State<AppState>,
+    Path(key_id): Path<Uuid>,
+) -> AppResult<Json<serde_json::Value>> {
+    let affected =
+        sqlx::query("UPDATE api_keys SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL")
+            .bind(key_id)
+            .execute(&state.db)
+            .await?
+            .rows_affected();
+    if affected == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(serde_json::json!({ "success": true })))
+}
+
 #[derive(Deserialize)]
 pub struct SetQuotaRequest {
     /// 0 = unlimited.

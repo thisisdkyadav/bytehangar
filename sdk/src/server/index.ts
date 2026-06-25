@@ -2,6 +2,7 @@
 // optional admin token). NEVER import this from browser code: it carries secrets.
 
 import {
+  type ApiKeySummary,
   ByteHangarError,
   type FileRecord,
   type GrantResult,
@@ -164,6 +165,26 @@ export class ByteHangarServer {
       auth: "admin",
       body: { name, role },
     });
+  }
+
+  /** List a tenant's API keys (never the secret values). */
+  async listKeys(tenantId: string): Promise<ApiKeySummary[]> {
+    const data = await this.request<any>("GET", `/internal/v1/tenants/${tenantId}/keys`, {
+      auth: "admin",
+    });
+    return (data.keys as any[]).map((k) => ({
+      id: k.id,
+      name: k.name,
+      role: k.role,
+      createdAt: k.created_at,
+      lastUsedAt: k.last_used_at,
+      revokedAt: k.revoked_at,
+    }));
+  }
+
+  /** Revoke an API key by id. */
+  async revokeKey(keyId: string): Promise<void> {
+    await this.request("DELETE", `/internal/v1/keys/${keyId}`, { auth: "admin" });
   }
 
   async setQuota(tenantId: string, quotaBytes: number): Promise<void> {

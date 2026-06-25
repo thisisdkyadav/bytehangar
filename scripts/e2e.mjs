@@ -58,6 +58,19 @@ async function main() {
   const storage = new ByteHangarServer({ baseUrl: INTERNAL, apiKey: created.key });
   const client = new ByteHangarClient({ baseUrl: PUBLIC });
 
+  // --- api key lifecycle ---
+  const key2 = await admin.createKey(tenant.id, "e2e-key-2");
+  const keys = await admin.listKeys(tenant.id);
+  check("listKeys returns created keys", keys.length >= 2 && keys.some((k) => k.id === key2.id));
+  await admin.revokeKey(key2.id);
+  let keyRejected = false;
+  try {
+    await new ByteHangarServer({ baseUrl: INTERNAL, apiKey: key2.key }).getUsage();
+  } catch (err) {
+    keyRejected = err.status === 401;
+  }
+  check("revoked key is rejected", keyRejected);
+
   // --- plane isolation: internal routes must NOT be on the public port ---
   const probe = await fetch(`${PUBLIC}/internal/v1/usage`);
   check("internal plane not exposed on public port", probe.status === 404);

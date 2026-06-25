@@ -8,7 +8,7 @@
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{get, patch, post, put};
+use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
 use serde_json::{json, Value};
 use tower_http::cors::{Any, CorsLayer};
@@ -56,7 +56,11 @@ fn internal_routes() -> Router<AppState> {
     Router::new()
         // provisioning (admin token)
         .route("/tenants", post(tenants::create_tenant).get(tenants::list_tenants))
-        .route("/tenants/{id}/keys", post(tenants::create_key))
+        .route(
+            "/tenants/{id}/keys",
+            post(tenants::create_key).get(tenants::list_keys),
+        )
+        .route("/keys/{keyId}", delete(tenants::revoke_key))
         .route("/tenants/{id}/quota", patch(tenants::set_quota))
         .route("/tenants/{id}/download-auth", patch(tenants::set_download_auth))
         .route("/tenants/{id}/webhook", patch(tenants::set_webhook))
