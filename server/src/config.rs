@@ -70,7 +70,7 @@ impl Config {
             internal_port: env_parse("INTERNAL_PORT", 5101)?,
             database_url: env_string(
                 "DATABASE_URL",
-                "postgres://bytehangar:bytehangar@localhost:5432/bytehangar",
+                "postgres://bytehangar:bytehangar@localhost:5433/bytehangar",
             ),
             data_root: env_string("DATA_ROOT", "./data"),
             storage_backend: match env_string("STORAGE_BACKEND", "local").as_str() {
