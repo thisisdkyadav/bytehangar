@@ -45,6 +45,16 @@ async function main() {
   const created = await admin.createKey(tenant.id, "e2e-key");
   check("createKey returns plaintext key", created.key?.startsWith("bh_"));
 
+  // --- ops endpoints (internal plane) ---
+  const readyRes = await fetch(`${INTERNAL}/ready`);
+  check("readiness 200 with DB up", readyRes.status === 200);
+  const metricsRes = await fetch(`${INTERNAL}/metrics`);
+  const metricsText = await metricsRes.text();
+  check(
+    "metrics exposes prometheus counters",
+    metricsRes.status === 200 && metricsText.includes("bytehangar_uploads_total"),
+  );
+
   const storage = new ByteHangarServer({ baseUrl: INTERNAL, apiKey: created.key });
   const client = new ByteHangarClient({ baseUrl: PUBLIC });
 

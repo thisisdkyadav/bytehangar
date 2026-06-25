@@ -253,6 +253,8 @@ pub async fn upload(
         return Err(err);
     }
 
+    state.metrics.record_upload(size);
+
     webhooks::dispatch(
         state.http_client.clone(),
         &tenant,
@@ -441,6 +443,7 @@ pub async fn download(
     }
 
     let stream = state.blob.open_reader(&file.stored_key).await?;
+    state.metrics.record_download(file.size_bytes);
 
     // best-effort egress metering
     let _ = sqlx::query("INSERT INTO usage_events (tenant_id, op, bytes) VALUES ($1, 'egress', $2)")
@@ -668,6 +671,7 @@ pub async fn delete_file(
     let size = size.ok_or(AppError::NotFound)?;
     usage::record_delete(&mut tx, ctx.tenant.id, size).await?;
     tx.commit().await?;
+    state.metrics.record_delete();
 
     webhooks::dispatch(
         state.http_client.clone(),

@@ -4,6 +4,7 @@ use sqlx::PgPool;
 
 use crate::blob::BlobBackend;
 use crate::config::Config;
+use crate::metrics::Metrics;
 use crate::secrets::Secrets;
 
 /// Shared application state passed to every handler.
@@ -15,4 +16,5 @@ pub struct AppState {
     pub secrets: Arc<Secrets>,
     /// Shared outbound HTTP client (webhooks, download-auth callbacks).
     pub http_client: reqwest::Client,
+    pub metrics: Arc<Metrics>,
 }

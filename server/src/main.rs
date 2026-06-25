@@ -13,6 +13,7 @@ mod files;
 mod gc;
 mod grants;
 mod http;
+mod metrics;
 mod secrets;
 mod state;
 mod tenants;
@@ -64,6 +65,7 @@ async fn main() -> anyhow::Result<()> {
         blob,
         secrets,
         http_client,
+        metrics: Arc::new(metrics::Metrics::default()),
     };
 
     let public_listener = tokio::net::TcpListener::bind(&public_addr).await?;

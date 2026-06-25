@@ -5,12 +5,14 @@
 //!   /v1/*           — public/edge: grant-authorized upload, signed download
 //!   /health         — liveness
 
-use axum::extract::DefaultBodyLimit;
-use axum::http::HeaderValue;
+use axum::extract::{DefaultBodyLimit, State};
+use axum::http::{HeaderValue, StatusCode};
+use axum::response::IntoResponse;
 use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use serde_json::{json, Value};
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::trace::TraceLayer;
 
 use crate::state::AppState;
 use crate::{catalog, files, gc, grants, tenants, usage};
@@ -19,7 +21,10 @@ use crate::{catalog, files, gc, grants, tenants, usage};
 pub fn internal_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/ready", get(ready))
+        .route("/metrics", get(metrics_handler))
         .nest("/internal/v1", internal_routes())
+        .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
 
@@ -28,8 +33,10 @@ pub fn public_router(state: AppState) -> Router {
     let cors = build_cors(&state.config.allowed_origins);
     Router::new()
         .route("/health", get(health))
+        .route("/ready", get(ready))
         .nest("/v1", public_routes())
         .layer(cors)
+        .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
 
@@ -82,4 +89,19 @@ fn public_routes() -> Router<AppState> {
 
 async fn health() -> Json<Value> {
     Json(json!({ "success": true, "service": "bytehangar", "status": "ok" }))
+}
+
+/// Readiness: confirms the database is reachable.
+async fn ready(State(state): State<AppState>) -> impl IntoResponse {
+    match sqlx::query("SELECT 1").execute(&state.db).await {
+        Ok(_) => (StatusCode::OK, Json(json!({ "status": "ready" }))),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "status": "not_ready" })),
+        ),
+    }
+}
+
+async fn metrics_handler(State(state): State<AppState>) -> String {
+    state.metrics.render_prometheus()
 }
