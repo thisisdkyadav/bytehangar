@@ -668,8 +668,8 @@ pub async fn delete_file(
     .bind(&file_ref)
     .fetch_optional(&mut *tx)
     .await?;
-    let size = size.ok_or(AppError::NotFound)?;
-    usage::record_delete(&mut tx, ctx.tenant.id, size).await?;
+    let deleted_size = size.ok_or(AppError::NotFound)?;
+    usage::record_delete(&mut tx, ctx.tenant.id, deleted_size).await?;
     tx.commit().await?;
     state.metrics.record_delete();
 
@@ -685,4 +685,42 @@ pub async fn delete_file(
     );
 
     Ok(Json(serde_json::json!({ "success": true })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn content_disposition_blocks_header_injection() {
+        let cd = content_disposition("inline", "evil\"\r\nX-Bad: 1.png");
+        assert!(!cd.contains('\r'));
+        assert!(!cd.contains('\n'));
+        // The injected quote is neutralized: only the two wrapping quotes remain.
+        assert_eq!(cd.matches('"').count(), 2);
+    }
+
+    #[test]
+    fn content_disposition_handles_unicode() {
+        let cd = content_disposition("attachment", "résumé.pdf");
+        assert!(cd.contains("filename*=UTF-8''"));
+        assert!(cd.starts_with("attachment; "));
+    }
+
+    #[test]
+    fn ext_mapping() {
+        assert_eq!(ext_for("image/png", None), "png");
+        assert_eq!(ext_for("image/jpeg", None), "jpg");
+        assert_eq!(ext_for("application/pdf", None), "pdf");
+        assert_eq!(ext_for("application/octet-stream", Some("file.bin")), "bin");
+        assert_eq!(ext_for("application/octet-stream", None), "bin");
+    }
+
+    #[test]
+    fn master_allowlist() {
+        assert!(master_allowed("image/png"));
+        assert!(master_allowed("application/pdf"));
+        assert!(!master_allowed("application/x-msdownload"));
+        assert!(!master_allowed("text/html"));
+    }
 }

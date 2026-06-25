@@ -125,3 +125,80 @@ pub fn verify_download(
     let message = format!("{tenant_id}.{file_ref}.{exp}");
     hmac_verify(secret.as_bytes(), message.as_bytes(), signature)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::GrantClaims;
+
+    fn claims() -> GrantClaims {
+        GrantClaims {
+            t: "tenant".into(),
+            p: "policy".into(),
+            cat: "cat".into(),
+            max: 1024,
+            ct: vec!["image/png".into()],
+            n: "nonce".into(),
+            exp: 9_999_999_999,
+            vis: "private".into(),
+        }
+    }
+
+    #[test]
+    fn grant_roundtrip() {
+        let token = encode_grant("s3cr3t", &claims()).unwrap();
+        let decoded = decode_grant("s3cr3t", &token).unwrap();
+        assert_eq!(decoded.p, "policy");
+        assert_eq!(decoded.max, 1024);
+        assert_eq!(decoded.vis, "private");
+    }
+
+    #[test]
+    fn grant_wrong_secret_rejected() {
+        let token = encode_grant("right", &claims()).unwrap();
+        assert!(decode_grant("wrong", &token).is_err());
+    }
+
+    #[test]
+    fn grant_tamper_rejected() {
+        let token = encode_grant("s", &claims()).unwrap();
+        let parts: Vec<&str> = token.split('.').collect();
+        let tampered = format!("{}.{}x.{}", parts[0], parts[1], parts[2]);
+        assert!(decode_grant("s", &tampered).is_err());
+    }
+
+    #[test]
+    fn peek_reads_tenant_without_verifying() {
+        let token = encode_grant("s", &claims()).unwrap();
+        assert_eq!(peek_grant_claims(&token).unwrap().t, "tenant");
+    }
+
+    #[test]
+    fn download_sign_then_verify() {
+        let sig = sign_download("secret", "tenant", "fileref", 123);
+        assert!(verify_download("secret", "tenant", "fileref", 123, &sig));
+        assert!(!verify_download("secret", "tenant", "fileref", 124, &sig));
+        assert!(!verify_download("other", "tenant", "fileref", 123, &sig));
+    }
+
+    #[test]
+    fn sha256_known_vector() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn api_key_format_and_hash() {
+        let (key, hash) = generate_api_key();
+        assert!(key.starts_with("bh_"));
+        assert_eq!(hash, sha256_hex(key.as_bytes()));
+    }
+
+    #[test]
+    fn hmac_hex_is_deterministic_and_keyed() {
+        assert_eq!(hmac_hex("k", b"msg"), hmac_hex("k", b"msg"));
+        assert_ne!(hmac_hex("k", b"msg"), hmac_hex("k2", b"msg"));
+    }
+}

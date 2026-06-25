@@ -186,3 +186,20 @@ fn catalog_hash(policies: &[PolicyInput]) -> String {
     }
     crypto::sha256_hex(parts.as_bytes())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn category_validation() {
+        assert!(is_valid_category("profile-images"));
+        assert!(is_valid_category("a1-b2"));
+        assert!(!is_valid_category("Profile")); // uppercase
+        assert!(!is_valid_category("a/b")); // slash (path traversal vector)
+        assert!(!is_valid_category("..")); // dots
+        assert!(!is_valid_category("a b")); // space
+        assert!(!is_valid_category("")); // empty
+        assert!(!is_valid_category(&"x".repeat(65))); // too long
+    }
+}

@@ -78,3 +78,43 @@ impl Secrets {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roundtrip_with_key() {
+        let secrets = Secrets::new("master");
+        assert!(secrets.enabled());
+        let encrypted = secrets.encrypt("hello");
+        assert!(encrypted.starts_with("enc:v1:"));
+        assert_eq!(secrets.decrypt(&encrypted), "hello");
+    }
+
+    #[test]
+    fn no_key_is_passthrough() {
+        let secrets = Secrets::new("");
+        assert!(!secrets.enabled());
+        assert_eq!(secrets.encrypt("hello"), "hello");
+        assert_eq!(secrets.decrypt("hello"), "hello");
+    }
+
+    #[test]
+    fn legacy_plaintext_is_read_as_is() {
+        let secrets = Secrets::new("master");
+        assert_eq!(secrets.decrypt("legacy-plaintext"), "legacy-plaintext");
+    }
+
+    #[test]
+    fn wrong_key_fails_closed() {
+        let encrypted = Secrets::new("right").encrypt("hello");
+        assert_eq!(Secrets::new("wrong").decrypt(&encrypted), "");
+    }
+
+    #[test]
+    fn nonce_is_randomized() {
+        let secrets = Secrets::new("master");
+        assert_ne!(secrets.encrypt("x"), secrets.encrypt("x"));
+    }
+}
