@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  server:
+    name: server (clippy + test + build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: server
+      - run: cargo test
+        working-directory: server
+      - run: cargo build --release
+        working-directory: server
+
+  sdk:
+    name: sdk (typecheck + build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: sdk/package-lock.json
+      - run: npm ci
+        working-directory: sdk
+      - run: npm run build
+        working-directory: sdk
+
+  e2e:
+    name: e2e (local + s3)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Start Postgres + MinIO
+        run: docker compose -p bytehangar up -d --wait --wait-timeout 120
+      - name: Create MinIO bucket
+        run: |
+          docker run --rm --network bytehangar_default --entrypoint sh minio/mc -c \
+            "mc alias set m http://minio:9000 bytehangar bytehangar-secret && mc mb -p m/bytehangar"
+      - name: e2e (local backend)
+        run: bash scripts/run-e2e.sh
+      - name: e2e (s3 backend)
+        env:
+          STORAGE_BACKEND: s3
+          PORT: "5181"
+          S3_ENDPOINT: http://localhost:9100
+          S3_BUCKET: bytehangar
+          S3_ACCESS_KEY_ID: bytehangar
+          S3_SECRET_ACCESS_KEY: bytehangar-secret
+          S3_FORCE_PATH_STYLE: "true"
+          S3_REGION: us-east-1
+        run: bash scripts/run-e2e.sh

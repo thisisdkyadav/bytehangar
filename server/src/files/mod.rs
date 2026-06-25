@@ -293,22 +293,17 @@ async fn stream_field(
 
     // 1. Buffer a small head for content sniffing (still under the size cap).
     let mut head: Vec<u8> = Vec::new();
-    loop {
-        match field
-            .chunk()
-            .await
-            .map_err(|err| AppError::BadRequest(err.to_string()))?
-        {
-            Some(chunk) => {
-                if head.len() as u64 + chunk.len() as u64 > max {
-                    return Err(AppError::PayloadTooLarge);
-                }
-                head.extend_from_slice(&chunk);
-                if head.len() >= SNIFF_LEN {
-                    break;
-                }
-            }
-            None => break,
+    while let Some(chunk) = field
+        .chunk()
+        .await
+        .map_err(|err| AppError::BadRequest(err.to_string()))?
+    {
+        if head.len() as u64 + chunk.len() as u64 > max {
+            return Err(AppError::PayloadTooLarge);
+        }
+        head.extend_from_slice(&chunk);
+        if head.len() >= SNIFF_LEN {
+            break;
         }
     }
     if head.is_empty() {
