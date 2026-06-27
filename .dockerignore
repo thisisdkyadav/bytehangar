@@ -1,0 +1,9 @@
+.git
+.github
+server/target
+sdk/node_modules
+sdk/dist
+data
+.e2e-data
+.e2e-server.log
+*.md

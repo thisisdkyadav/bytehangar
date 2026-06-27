@@ -1,6 +1,7 @@
 // Scaffolding phase: domain types and helpers land incrementally.
 #![allow(dead_code)]
 
+mod audit;
 mod auth;
 mod blob;
 mod catalog;

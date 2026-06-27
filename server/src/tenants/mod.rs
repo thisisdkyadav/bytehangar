@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::audit;
 use crate::auth::AdminAuth;
 use crate::crypto;
 use crate::error::{AppError, AppResult};
@@ -119,6 +120,16 @@ pub async fn create_tenant(
         .await?;
     tx.commit().await?;
 
+    audit::record(
+        &state.db,
+        Some(tenant.id),
+        "admin",
+        "tenant.create",
+        Some(&tenant.id.to_string()),
+        serde_json::json!({ "name": tenant.name.clone() }),
+    )
+    .await;
+
     Ok(Json(TenantResponse {
         id: tenant.id,
         name: tenant.name,
@@ -164,6 +175,16 @@ pub async fn create_key(
     .bind(&role)
     .fetch_one(&state.db)
     .await?;
+
+    audit::record(
+        &state.db,
+        Some(tenant.id),
+        "admin",
+        "apikey.create",
+        Some(&id.to_string()),
+        serde_json::json!({ "name": req.name.clone(), "role": role.clone() }),
+    )
+    .await;
 
     Ok(Json(CreateKeyResponse { id, key }))
 }
@@ -299,6 +320,15 @@ pub async fn revoke_key(
     if affected == 0 {
         return Err(AppError::NotFound);
     }
+    audit::record(
+        &state.db,
+        None,
+        "admin",
+        "apikey.revoke",
+        Some(&key_id.to_string()),
+        serde_json::json!({}),
+    )
+    .await;
     Ok(Json(serde_json::json!({ "success": true })))
 }
 
@@ -324,6 +354,15 @@ pub async fn set_quota(
     if affected == 0 {
         return Err(AppError::NotFound);
     }
+    audit::record(
+        &state.db,
+        Some(tenant_id),
+        "admin",
+        "tenant.set_quota",
+        Some(&tenant_id.to_string()),
+        serde_json::json!({ "quota_bytes": req.quota_bytes }),
+    )
+    .await;
     Ok(Json(serde_json::json!({ "success": true })))
 }
 
@@ -350,6 +389,15 @@ pub async fn set_download_auth(
     if affected == 0 {
         return Err(AppError::NotFound);
     }
+    audit::record(
+        &state.db,
+        Some(tenant_id),
+        "admin",
+        "tenant.set_download_auth",
+        Some(&tenant_id.to_string()),
+        serde_json::json!({ "configured": req.url.is_some() }),
+    )
+    .await;
     Ok(Json(serde_json::json!({ "success": true })))
 }
 
@@ -393,5 +441,14 @@ pub async fn set_webhook(
     if affected == 0 {
         return Err(AppError::NotFound);
     }
+    audit::record(
+        &state.db,
+        Some(tenant_id),
+        "admin",
+        "tenant.set_webhook",
+        Some(&tenant_id.to_string()),
+        serde_json::json!({ "configured": url.is_some() }),
+    )
+    .await;
     Ok(Json(SetWebhookResponse { url, secret }))
 }

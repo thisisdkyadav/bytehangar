@@ -70,3 +70,14 @@ jobs:
           S3_FORCE_PATH_STYLE: "true"
           S3_REGION: us-east-1
         run: bash scripts/run-e2e.sh
+
+  audit:
+    name: cargo audit (advisories)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit
+        working-directory: server
