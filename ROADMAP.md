@@ -14,7 +14,23 @@ media features and a few real security/ops gaps.**
 
 ---
 
-## 🔴 Security follow-ups — do first (the repo is already public)
+## ✅ Shipped since v1.0.0
+
+- **v1.0.1** — all four security follow-ups below: SSRF guard (private/link-local/loopback +
+  scheme/redirect restriction), constant-time + boot-strength admin-token check, suspended-tenant
+  enforcement on the edge, signed download `disposition`.
+- **v1.1.0** — the entire v1.1 list below: internal GC scheduler + always-on grant pruner,
+  configurable DB pool, boot config validation + DB ping, graceful webhook drain, Dockerfile
+  hardening, audit-log writes, transactional GC (advisory-xact lock, no leak), release automation
+  (GHCR-on-tag + cargo-audit + dependabot + pinned toolchain), configurable content-type allowlist,
+  app-supplied upload metadata, soft-delete restore, Cache-Control/ETag/conditional-GET — plus
+  stored-XSS hardening (render-unsafe denylist + nosniff) from an adversarial review.
+  *Still open from v1.1:* **DB-backed integration tests** [L] (only unit + happy-path e2e today) —
+  carried into v1.2.
+
+---
+
+## ✅ Security follow-ups — DONE in v1.0.1
 
 - **SSRF on webhook + download-auth callback URLs** [M] — the server makes outbound requests
   to fully tenant-controlled URLs (`webhooks` worker, `files::authorize_via_callback`) with no
@@ -28,7 +44,7 @@ media features and a few real security/ops gaps.**
 - **Sign the download `disposition`** [S] — it's appended to the signed URL unsigned, so it's
   tamperable (low impact, but it's in the signed surface).
 
-## v1.1 — Harden & unblock (mostly S/M; the credibility release)
+## ✅ v1.1 — Harden & unblock — DONE in v1.1.0 (except DB integration tests, see above)
 
 **Ops / reliability**
 - **Automated internal GC + grant/tombstone pruning scheduler** [M] — GC is a manual endpoint
@@ -94,7 +110,7 @@ machine-readable error `code` taxonomy · React drag-and-drop dropzone · quicks
 ---
 
 ## Recommended sequence
-1. **Security follow-ups** (SSRF first) — small, and the repo is live.
-2. **v1.1** — turns a "works" product into a "trustworthy, operable" one; nearly all S/M.
-3. **v1.2 image transforms** — the single biggest adoption lever.
+1. ~~Security follow-ups~~ — **shipped in v1.0.1**.
+2. ~~v1.1 harden & unblock~~ — **shipped in v1.1.0** (DB-backed integration tests carried to v1.2).
+3. **v1.2 image transforms** (+ DB integration tests) — the single biggest adoption lever, NEXT.
 4. **v2.0 resumable uploads** — the biggest reliability gap, but XL; do after the base is hardened.
