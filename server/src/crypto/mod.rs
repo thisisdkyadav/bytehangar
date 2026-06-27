@@ -110,8 +110,14 @@ pub fn decode_grant(secret: &str, token: &str) -> AppResult<GrantClaims> {
 // Signed download URLs:  sign "<tenant>.<file_ref>.<exp>" with the tenant secret
 // ---------------------------------------------------------------------------
 
-pub fn sign_download(secret: &str, tenant_id: &str, file_ref: &str, exp: i64) -> String {
-    let message = format!("{tenant_id}.{file_ref}.{exp}");
+pub fn sign_download(
+    secret: &str,
+    tenant_id: &str,
+    file_ref: &str,
+    exp: i64,
+    disposition: &str,
+) -> String {
+    let message = format!("{tenant_id}.{file_ref}.{exp}.{disposition}");
     hmac_sign(secret.as_bytes(), message.as_bytes())
 }
 
@@ -120,9 +126,10 @@ pub fn verify_download(
     tenant_id: &str,
     file_ref: &str,
     exp: i64,
+    disposition: &str,
     signature: &str,
 ) -> bool {
-    let message = format!("{tenant_id}.{file_ref}.{exp}");
+    let message = format!("{tenant_id}.{file_ref}.{exp}.{disposition}");
     hmac_verify(secret.as_bytes(), message.as_bytes(), signature)
 }
 
@@ -175,10 +182,11 @@ mod tests {
 
     #[test]
     fn download_sign_then_verify() {
-        let sig = sign_download("secret", "tenant", "fileref", 123);
-        assert!(verify_download("secret", "tenant", "fileref", 123, &sig));
-        assert!(!verify_download("secret", "tenant", "fileref", 124, &sig));
-        assert!(!verify_download("other", "tenant", "fileref", 123, &sig));
+        let sig = sign_download("secret", "tenant", "fileref", 123, "inline");
+        assert!(verify_download("secret", "tenant", "fileref", 123, "inline", &sig));
+        assert!(!verify_download("secret", "tenant", "fileref", 124, "inline", &sig)); // exp
+        assert!(!verify_download("other", "tenant", "fileref", 123, "inline", &sig)); // secret
+        assert!(!verify_download("secret", "tenant", "fileref", 123, "attachment", &sig)); // disposition
     }
 
     #[test]

@@ -33,10 +33,22 @@ impl FromRequestParts<AppState> for AdminAuth {
             .get("x-bytehangar-admin")
             .and_then(|value| value.to_str().ok());
         match provided {
-            Some(token) if token == expected => Ok(AdminAuth),
+            Some(token) if constant_time_eq(token.as_bytes(), expected.as_bytes()) => Ok(AdminAuth),
             _ => Err(AppError::Unauthorized),
         }
     }
+}
+
+/// Constant-time byte comparison (avoids timing oracles on the admin token).
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 pub struct TenantContext {
@@ -90,6 +102,9 @@ impl FromRequestParts<AppState> for GrantContext {
         let tenant = tenants::find_tenant_by_id(&state.db, &state.secrets, tenant_id)
             .await?
             .ok_or(AppError::Unauthorized)?;
+        if tenant.status != "active" {
+            return Err(AppError::Forbidden);
+        }
         let claims = crypto::decode_grant(tenant.signing_secret(), &token)?;
         if claims.exp < Utc::now().timestamp() {
             return Err(AppError::Unauthorized);

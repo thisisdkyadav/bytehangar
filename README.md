@@ -113,6 +113,8 @@ Full SDK docs (incl. the React `<UploadButton>`): [sdk/README.md](./sdk/README.m
 - **Multi-tenant isolation**: per-tenant keys + secrets; every blob path and signature is tenant-scoped.
 - **Webhooks** are HMAC-signed (`x-bytehangar-signature: sha256=…`) and **durable** (persisted in the same transaction as the event, then retried with backoff). Delivery is **at-least-once** — dedupe on event + file_ref.
 - **Rate limiting**: built-in per-client-IP token bucket on the public `/v1` plane (`RATE_LIMIT_*`), keyed on the socket peer by default; set `TRUST_FORWARDED_FOR=true` only behind a trusted proxy. TLS and global/L7 DDoS protection still belong at the reverse proxy / ingress.
+- **SSRF guard**: outbound calls to tenant-controlled URLs (webhook + download-auth callback) reject private / loopback / link-local / cloud-metadata targets and don't follow redirects; `ALLOW_PRIVATE_OUTBOUND=true` opts out for trusted internal use.
+- **Edge hardening**: admin token compared in constant time (min length enforced in production); suspended tenants blocked on the public plane; the download `disposition` is part of the signed URL.
 - **Request IDs**: every request gets a server-assigned `x-request-id`, echoed on the response and in logs.
 
 ---

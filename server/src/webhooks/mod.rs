@@ -76,16 +76,26 @@ struct DueDelivery {
 }
 
 /// Background worker loop. Spawn once at startup.
-pub async fn run_worker(db: PgPool, client: reqwest::Client, secrets: Arc<Secrets>) {
+pub async fn run_worker(
+    db: PgPool,
+    client: reqwest::Client,
+    secrets: Arc<Secrets>,
+    allow_private: bool,
+) {
     loop {
-        if let Err(err) = process_batch(&db, &client, &secrets).await {
+        if let Err(err) = process_batch(&db, &client, &secrets, allow_private).await {
             tracing::error!("webhook worker error: {err}");
         }
         tokio::time::sleep(StdDuration::from_secs(POLL_INTERVAL_SECS)).await;
     }
 }
 
-async fn process_batch(db: &PgPool, client: &reqwest::Client, secrets: &Secrets) -> AppResult<()> {
+async fn process_batch(
+    db: &PgPool,
+    client: &reqwest::Client,
+    secrets: &Secrets,
+    allow_private: bool,
+) -> AppResult<()> {
     // Claim a batch atomically: bump attempts and push next_attempt_at out by the
     // lease so concurrent workers skip these rows while we deliver them.
     let lease = Utc::now() + Duration::seconds(CLAIM_LEASE_SECS);
@@ -107,13 +117,25 @@ async fn process_batch(db: &PgPool, client: &reqwest::Client, secrets: &Secrets)
     // the whole batch finishes well within the claim lease.
     stream::iter(claimed)
         .for_each_concurrent(DELIVERY_CONCURRENCY, |delivery| {
-            deliver(db, client, secrets, delivery)
+            deliver(db, client, secrets, allow_private, delivery)
         })
         .await;
     Ok(())
 }
 
-async fn deliver(db: &PgPool, client: &reqwest::Client, secrets: &Secrets, delivery: DueDelivery) {
+async fn deliver(
+    db: &PgPool,
+    client: &reqwest::Client,
+    secrets: &Secrets,
+    allow_private: bool,
+    delivery: DueDelivery,
+) {
+    // SSRF guard: the URL is tenant-controlled. A blocked target is a permanent
+    // failure (don't retry — it won't become safe).
+    if let Err(reason) = crate::ssrf::validate(&delivery.url, allow_private).await {
+        mark_failed(db, delivery.id, &format!("blocked target: {reason}")).await;
+        return;
+    }
     let body = match serde_json::to_vec(&delivery.payload) {
         Ok(body) => body,
         Err(err) => return mark_failed(db, delivery.id, &format!("serialize: {err}")).await,

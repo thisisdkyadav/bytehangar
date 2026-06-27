@@ -55,6 +55,9 @@ pub struct Config {
     /// Trust X-Forwarded-For / X-Real-IP for the client IP. Enable ONLY behind a
     /// trusted proxy; otherwise the limiter keys on the (unspoofable) socket peer.
     pub trust_forwarded_for: bool,
+    /// Allow outbound webhook / download-auth-callback requests to private,
+    /// loopback, and link-local targets. Default false (SSRF guard on).
+    pub allow_private_outbound: bool,
 }
 
 impl Config {
@@ -67,10 +70,18 @@ impl Config {
     pub fn from_env() -> AppResult<Self> {
         let environment = env_string("APP_ENV", "development");
         let master_key = env_string("MASTER_KEY", "");
-        if environment == "production" && master_key.is_empty() {
-            return Err(AppError::Internal(
-                "MASTER_KEY is required when APP_ENV=production".into(),
-            ));
+        let admin_token = env_string("ADMIN_TOKEN", "");
+        if environment == "production" {
+            if master_key.is_empty() {
+                return Err(AppError::Internal(
+                    "MASTER_KEY is required when APP_ENV=production".into(),
+                ));
+            }
+            if !admin_token.is_empty() && admin_token.len() < 24 {
+                return Err(AppError::Internal(
+                    "ADMIN_TOKEN must be at least 24 characters when APP_ENV=production".into(),
+                ));
+            }
         }
         Ok(Self {
             port: env_parse("PORT", 5100)?,
@@ -101,7 +112,7 @@ impl Config {
                 force_path_style: env_parse("S3_FORCE_PATH_STYLE", false)?,
             },
             max_upload_bytes: env_parse("MAX_UPLOAD_BYTES", 50 * 1024 * 1024)?,
-            admin_token: env_string("ADMIN_TOKEN", ""),
+            admin_token,
             signed_url_ttl_seconds: env_parse("SIGNED_URL_TTL_SECONDS", 300)?,
             public_base_url: env_string("PUBLIC_BASE_URL", ""),
             bind: env_string("BIND_ADDRESS", "0.0.0.0"),
@@ -112,6 +123,7 @@ impl Config {
             rate_limit_per_second: env_parse("RATE_LIMIT_PER_SECOND", 50)?,
             rate_limit_burst: env_parse("RATE_LIMIT_BURST", 100)?,
             trust_forwarded_for: env_parse("TRUST_FORWARDED_FOR", false)?,
+            allow_private_outbound: env_parse("ALLOW_PRIVATE_OUTBOUND", false)?,
         })
     }
 }

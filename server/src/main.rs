@@ -16,6 +16,7 @@ mod http;
 mod metrics;
 mod rate_limit;
 mod secrets;
+mod ssrf;
 mod state;
 mod tenants;
 mod usage;
@@ -55,6 +56,8 @@ async fn main() -> anyhow::Result<()> {
 
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
+        // No redirects: a public webhook/callback URL must not 30x to a private target.
+        .redirect(reqwest::redirect::Policy::none())
         .build()?;
     let rate_limiter = Arc::new(rate_limit::RateLimiter::new(
         config.rate_limit_per_second,
@@ -80,6 +83,7 @@ async fn main() -> anyhow::Result<()> {
         state.db.clone(),
         state.http_client.clone(),
         state.secrets.clone(),
+        state.config.allow_private_outbound,
     ));
 
     let public_listener = tokio::net::TcpListener::bind(&public_addr).await?;

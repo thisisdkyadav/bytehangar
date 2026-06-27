@@ -17,6 +17,8 @@ export MASTER_KEY="${MASTER_KEY:-e2e-master-key-change-me}"
 # Keep the rate limiter enabled (exercises the middleware) but un-throttled for the suite.
 export RATE_LIMIT_PER_SECOND="${RATE_LIMIT_PER_SECOND:-100000}"
 export RATE_LIMIT_BURST="${RATE_LIMIT_BURST:-100000}"
+# The e2e runs its webhook/callback servers on loopback, which the SSRF guard blocks.
+export ALLOW_PRIVATE_OUTBOUND="${ALLOW_PRIVATE_OUTBOUND:-true}"
 export STORAGE_BACKEND="${STORAGE_BACKEND:-local}"
 export DATA_ROOT="${DATA_ROOT:-$ROOT/.e2e-data}"
 

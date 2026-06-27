@@ -411,9 +411,18 @@ pub async fn download(
     let tenant = tenants::find_tenant_by_id(&state.db, &state.secrets, tenant_id)
         .await?
         .ok_or(AppError::Unauthorized)?;
+    if tenant.status != "active" {
+        return Err(AppError::Forbidden);
+    }
     let file = find_file(&state.db, tenant_id, &file_ref)
         .await?
         .ok_or(AppError::NotFound)?;
+
+    // Disposition is part of the signed surface, so normalize it before verifying.
+    let disposition = match query.disposition.as_deref() {
+        Some("attachment") => "attachment",
+        _ => "inline",
+    };
 
     // Public files need no authorization. Private files need a valid signed URL
     // or, failing that, approval from the tenant's download-auth callback.
@@ -421,16 +430,29 @@ pub async fn download(
         let mut authorized = false;
         if let (Some(exp), Some(sig)) = (query.exp, query.sig.as_ref()) {
             if exp >= Utc::now().timestamp()
-                && crypto::verify_download(tenant.signing_secret(), &query.t, &file_ref, exp, sig)
+                && crypto::verify_download(
+                    tenant.signing_secret(),
+                    &query.t,
+                    &file_ref,
+                    exp,
+                    disposition,
+                    sig,
+                )
             {
                 authorized = true;
             }
         }
         if !authorized {
             if let Some(callback) = tenant.download_auth_url.as_deref() {
-                authorized =
-                    authorize_via_callback(&state.http_client, callback, &headers, tenant_id, &file)
-                        .await;
+                authorized = authorize_via_callback(
+                    &state.http_client,
+                    state.config.allow_private_outbound,
+                    callback,
+                    &headers,
+                    tenant_id,
+                    &file,
+                )
+                .await;
             }
         }
         if !authorized {
@@ -448,11 +470,6 @@ pub async fn download(
         .execute(&state.db)
         .await;
 
-    let disposition = match query.disposition.as_deref() {
-        Some("attachment") => "attachment",
-        _ => "inline",
-    };
-
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, file.content_type)
@@ -469,11 +486,16 @@ pub async fn download(
 /// Forwards the requester's Authorization/Cookie; a 2xx response authorizes.
 async fn authorize_via_callback(
     client: &reqwest::Client,
+    allow_private: bool,
     callback: &str,
     headers: &HeaderMap,
     tenant_id: Uuid,
     file: &FileRecord,
 ) -> bool {
+    // SSRF guard: the callback URL is tenant-controlled.
+    if crate::ssrf::validate(callback, allow_private).await.is_err() {
+        return false;
+    }
     let tenant = tenant_id.to_string();
     let mut request = client
         .get(callback)
@@ -633,12 +655,13 @@ pub async fn sign(
     let expires_at = Utc::now() + Duration::seconds(ttl);
     let exp = expires_at.timestamp();
     let tenant_id = ctx.tenant.id.to_string();
-    let sig = crypto::sign_download(ctx.tenant.signing_secret(), &tenant_id, &file_ref, exp);
+    let disposition = match req.disposition.as_deref() {
+        Some("attachment") => "attachment",
+        _ => "inline",
+    };
+    let sig = crypto::sign_download(ctx.tenant.signing_secret(), &tenant_id, &file_ref, exp, disposition);
 
-    let mut url = format!("/v1/files/{file_ref}?t={tenant_id}&exp={exp}&sig={sig}");
-    if let Some(disposition) = &req.disposition {
-        url.push_str(&format!("&disposition={disposition}"));
-    }
+    let mut url = format!("/v1/files/{file_ref}?t={tenant_id}&exp={exp}&disposition={disposition}&sig={sig}");
     if !state.config.public_base_url.is_empty() {
         url = format!("{}{}", state.config.public_base_url.trim_end_matches('/'), url);
     }
