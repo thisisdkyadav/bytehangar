@@ -593,7 +593,7 @@ dependencies = [
  "dotenvy",
  "futures",
  "hex",
- "hmac 0.12.1",
+ "hmac 0.13.0",
  "infer",
  "rand 0.8.6",
  "reqwest",
