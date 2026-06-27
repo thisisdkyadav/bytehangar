@@ -148,6 +148,7 @@ mod tests {
             n: "nonce".into(),
             exp: 9_999_999_999,
             vis: "private".into(),
+            m: None,
         }
     }
 

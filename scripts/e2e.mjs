@@ -166,6 +166,47 @@ async function main() {
     tenantList.items.some((t) => t.id === tenant.id && t.objectCount >= 1),
   );
 
+  // --- upload metadata carried through the grant ---
+  const grantMeta = await storage.createGrant("img", {
+    metadata: { actorId: "user-42", entityHint: "post-7" },
+  });
+  const upMeta = await client.upload(grantMeta.token, new Blob([pngBytes(11)], { type: "image/png" }), {
+    fileName: "meta.png",
+  });
+  const metaRecord = await storage.getFile(upMeta.fileRef);
+  check(
+    "upload metadata persisted (actorId/entityHint)",
+    metaRecord.actorId === "user-42" && metaRecord.entityHint === "post-7",
+  );
+
+  // --- soft-delete restore ---
+  const grantR = await storage.createGrant("img");
+  const upR = await client.upload(grantR.token, new Blob([pngBytes(12)], { type: "image/png" }), {
+    fileName: "r.png",
+  });
+  await storage.deleteFile(upR.fileRef);
+  let goneR = false;
+  try {
+    await storage.getFile(upR.fileRef);
+  } catch {
+    goneR = true;
+  }
+  await storage.restoreFile(upR.fileRef);
+  const restored = await storage.getFile(upR.fileRef);
+  check("soft-delete restore brings the file back", goneR && restored.fileRef === upR.fileRef);
+
+  // --- conditional GET (ETag -> 304) on a public file ---
+  const grant304 = await storage.createGrant("pub");
+  const up304 = await client.upload(grant304.token, new Blob([pngBytes(13)], { type: "image/png" }), {
+    fileName: "c.png",
+  });
+  const first = await fetch(client.fileUrl(tenant.id, up304.fileRef));
+  const etag = first.headers.get("etag");
+  const second = await fetch(client.fileUrl(tenant.id, up304.fileRef), {
+    headers: { "if-none-match": etag ?? "" },
+  });
+  check("conditional GET returns 304 for a matching ETag", first.status === 200 && !!etag && second.status === 304);
+
   // --- visibility: public files served without a signature ---
   const pngPub = pngBytes(7);
   const grantPub = await storage.createGrant("pub");

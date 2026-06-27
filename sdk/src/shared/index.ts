@@ -48,8 +48,20 @@ export interface FileRecord {
   sizeBytes: number;
   checksumSha256: string;
   visibility: string;
+  actorId: string | null;
+  actorRole: string | null;
+  sourceService: string | null;
+  entityHint: string | null;
   createdAt: string;
   deletedAt: string | null;
+}
+
+/** App-supplied attribution metadata for an upload (carried in the grant). */
+export interface UploadMetadata {
+  actorId?: string;
+  actorRole?: string;
+  sourceService?: string;
+  entityHint?: string;
 }
 
 export interface SignResult {

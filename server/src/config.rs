@@ -32,6 +32,9 @@ pub struct Config {
     pub s3: S3Config,
     /// Inviolable global ceiling; per-policy limits may only be stricter.
     pub max_upload_bytes: u64,
+    /// Master content-type allowlist (sniffed type must be in it). Empty => allow
+    /// any type except the built-in executable denylist. Default: images + pdf.
+    pub allowed_content_types: Vec<String>,
     /// Bootstrap admin token for tenant/key provisioning. Empty => admin disabled.
     pub admin_token: String,
     /// Default TTL for minted signed download URLs.
@@ -126,6 +129,22 @@ impl Config {
                 force_path_style: env_parse("S3_FORCE_PATH_STYLE", false)?,
             },
             max_upload_bytes: env_parse("MAX_UPLOAD_BYTES", 50 * 1024 * 1024)?,
+            allowed_content_types: {
+                let raw = env_string("BLOB_ALLOWED_CONTENT_TYPES", "");
+                if raw.trim() == "*" {
+                    Vec::new() // allow all (except the executable denylist)
+                } else {
+                    let list = split_csv(&raw);
+                    if list.is_empty() {
+                        ["image/png", "image/jpeg", "image/webp", "image/gif", "application/pdf"]
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect()
+                    } else {
+                        list
+                    }
+                }
+            },
             admin_token,
             signed_url_ttl_seconds: env_parse("SIGNED_URL_TTL_SECONDS", 300)?,
             public_base_url: env_string("PUBLIC_BASE_URL", ""),

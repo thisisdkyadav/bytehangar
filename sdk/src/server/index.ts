@@ -11,6 +11,7 @@ import {
   type RegisterCatalogResult,
   type SignResult,
   type TenantSummary,
+  type UploadMetadata,
   type UsageResult,
 } from "../shared/index.js";
 
@@ -71,11 +72,20 @@ export class ByteHangarServer {
   /** Mint a short-lived, single-use upload grant to hand to the browser client. */
   async createGrant(
     policyKey: string,
-    opts: { expiresInSeconds?: number } = {},
+    opts: { expiresInSeconds?: number; metadata?: UploadMetadata } = {},
   ): Promise<GrantResult> {
     const data = await this.request<any>("POST", "/internal/v1/grants", {
       auth: "key",
-      body: { policy_key: policyKey, expires_in_seconds: opts.expiresInSeconds },
+      body: {
+        policy_key: policyKey,
+        expires_in_seconds: opts.expiresInSeconds,
+        metadata: opts.metadata && {
+          actor_id: opts.metadata.actorId,
+          actor_role: opts.metadata.actorRole,
+          source_service: opts.metadata.sourceService,
+          entity_hint: opts.metadata.entityHint,
+        },
+      },
     });
     return { token: data.token, expiresAt: data.expires_at };
   }
@@ -124,6 +134,15 @@ export class ByteHangarServer {
     await this.request<unknown>(
       "DELETE",
       `/internal/v1/files/${encodeURIComponent(fileRef)}`,
+      { auth: "key" },
+    );
+  }
+
+  /** Restore a soft-deleted file (within the GC retention window). */
+  async restoreFile(fileRef: string): Promise<void> {
+    await this.request<unknown>(
+      "POST",
+      `/internal/v1/files/${encodeURIComponent(fileRef)}/restore`,
       { auth: "key" },
     );
   }
@@ -333,6 +352,10 @@ function toFileRecord(d: any): FileRecord {
     sizeBytes: d.size_bytes,
     checksumSha256: d.checksum_sha256,
     visibility: d.visibility,
+    actorId: d.actor_id ?? null,
+    actorRole: d.actor_role ?? null,
+    sourceService: d.source_service ?? null,
+    entityHint: d.entity_hint ?? null,
     createdAt: d.created_at,
     deletedAt: d.deleted_at,
   };

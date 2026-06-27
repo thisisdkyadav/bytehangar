@@ -123,6 +123,7 @@ fn internal_routes() -> Router<AppState> {
         )
         .route("/files/{file_ref}/content", get(files::content))
         .route("/files/{file_ref}/sign", post(files::sign))
+        .route("/files/{file_ref}/restore", post(files::restore_file))
 }
 
 fn public_routes() -> Router<AppState> {

@@ -21,6 +21,9 @@ pub struct MintGrantRequest {
     pub policy_key: String,
     #[serde(default)]
     pub expires_in_seconds: Option<i64>,
+    /// Optional attribution metadata persisted on the uploaded file.
+    #[serde(default)]
+    pub metadata: Option<crate::domain::GrantMeta>,
 }
 
 #[derive(Serialize)]
@@ -67,6 +70,7 @@ pub async fn mint_grant(
         n: nonce.to_string(),
         exp: expires_at.timestamp(),
         vis: policy.visibility.clone(),
+        m: req.metadata,
     };
     let token = crypto::encode_grant(ctx.tenant.signing_secret(), &claims)?;
 

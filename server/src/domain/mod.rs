@@ -31,4 +31,20 @@ pub struct GrantClaims {
     pub exp: i64,
     /// visibility: "public" | "private"
     pub vis: String,
+    /// optional app-supplied upload metadata (attribution)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub m: Option<GrantMeta>,
+}
+
+/// App-supplied metadata attached to a grant and persisted on the uploaded file.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GrantMeta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_service: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_hint: Option<String>,
 }

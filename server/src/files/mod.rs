@@ -26,20 +26,28 @@ use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use crate::{tenants, usage, webhooks};
 
-/// Inviolable master content-type allowlist (no executables ever land).
-const MASTER_CONTENT_TYPES: &[&str] = &[
-    "image/png",
-    "image/jpeg",
-    "image/webp",
-    "image/gif",
-    "application/pdf",
+/// Inviolable denylist — these sniffed types are rejected regardless of config.
+const EXECUTABLE_DENYLIST: &[&str] = &[
+    "application/vnd.microsoft.portable-executable",
+    "application/x-msdownload",
+    "application/x-executable",
+    "application/x-elf",
+    "application/x-mach-binary",
+    "application/x-dosexec",
+    "application/x-sh",
+    "text/x-shellscript",
 ];
 
 /// Bytes buffered up-front for magic-byte content sniffing.
 const SNIFF_LEN: usize = 8192;
 
-fn master_allowed(content_type: &str) -> bool {
-    MASTER_CONTENT_TYPES.contains(&content_type)
+/// A sniffed content type is allowed if it is not an executable and either the
+/// configured allowlist is empty (allow-all) or contains it.
+fn master_allowed(allowed: &[String], content_type: &str) -> bool {
+    if EXECUTABLE_DENYLIST.contains(&content_type) {
+        return false;
+    }
+    allowed.is_empty() || allowed.iter().any(|t| t == content_type)
 }
 
 /// Build a safe Content-Disposition value. The filename is user-controlled, so we
@@ -97,12 +105,17 @@ pub struct FileRecord {
     pub size_bytes: i64,
     pub checksum_sha256: String,
     pub visibility: String,
+    pub actor_id: Option<String>,
+    pub actor_role: Option<String>,
+    pub source_service: Option<String>,
+    pub entity_hint: Option<String>,
     pub created_at: DateTime<Utc>,
     pub deleted_at: Option<DateTime<Utc>>,
 }
 
 const FILE_COLUMNS: &str = "id, tenant_id, file_ref, policy_key, category, original_name, \
-     stored_key, content_type, size_bytes, checksum_sha256, visibility, created_at, deleted_at";
+     stored_key, content_type, size_bytes, checksum_sha256, visibility, \
+     actor_id, actor_role, source_service, entity_hint, created_at, deleted_at";
 
 async fn find_file(db: &PgPool, tenant_id: Uuid, file_ref: &str) -> AppResult<Option<FileRecord>> {
     let query = format!(
@@ -157,7 +170,17 @@ pub async fn upload(
         .map_err(|err| AppError::BadRequest(err.to_string()))?
     {
         if field.name() == Some("file") {
-            staged = Some(stream_field(state.blob.as_ref(), tenant_id, &claims, max, field).await?);
+            staged = Some(
+                stream_field(
+                    state.blob.as_ref(),
+                    &state.config.allowed_content_types,
+                    tenant_id,
+                    &claims,
+                    max,
+                    field,
+                )
+                .await?,
+            );
             break;
         } else {
             let _ = field
@@ -221,10 +244,11 @@ pub async fn upload(
             }
         }
 
+        let meta = claims.m.as_ref();
         sqlx::query(
             "INSERT INTO files \
-             (id, tenant_id, file_ref, policy_key, category, original_name, stored_key, content_type, size_bytes, checksum_sha256, visibility) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+             (id, tenant_id, file_ref, policy_key, category, original_name, stored_key, content_type, size_bytes, checksum_sha256, visibility, actor_id, actor_role, source_service, entity_hint) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
         )
         .bind(staged.file_id)
         .bind(tenant_id)
@@ -237,6 +261,10 @@ pub async fn upload(
         .bind(size)
         .bind(&staged.checksum)
         .bind(&claims.vis)
+        .bind(meta.and_then(|m| m.actor_id.clone()))
+        .bind(meta.and_then(|m| m.actor_role.clone()))
+        .bind(meta.and_then(|m| m.source_service.clone()))
+        .bind(meta.and_then(|m| m.entity_hint.clone()))
         .execute(&mut *tx)
         .await?;
 
@@ -283,6 +311,7 @@ pub async fn upload(
 /// stream (hash + size-cap) -> commit. Aborts the writer on any failure.
 async fn stream_field(
     blob: &dyn BlobBackend,
+    allowed_content_types: &[String],
     tenant_id: Uuid,
     claims: &GrantClaims,
     max: u64,
@@ -316,7 +345,7 @@ async fn stream_field(
     let content_type = sniffed
         .or(declared_ct)
         .unwrap_or_else(|| "application/octet-stream".to_string());
-    if !master_allowed(&content_type) {
+    if !master_allowed(allowed_content_types, &content_type) {
         return Err(AppError::Forbidden);
     }
     if !claims.ct.is_empty() && !claims.ct.iter().any(|c| c == &content_type) {
@@ -460,6 +489,26 @@ pub async fn download(
         }
     }
 
+    // Content is immutable per file_ref, so ETag = checksum + conditional GET.
+    let etag = format!("\"{}\"", file.checksum_sha256);
+    if headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value == etag || value == "*")
+        .unwrap_or(false)
+    {
+        return Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header(header::ETAG, &etag)
+            .body(Body::empty())
+            .map_err(|err| AppError::Internal(err.to_string()));
+    }
+    let cache_control = if file.visibility == "public" {
+        "public, max-age=31536000, immutable"
+    } else {
+        "private, max-age=0, must-revalidate"
+    };
+
     let stream = state.blob.open_reader(&file.stored_key).await?;
     state.metrics.record_download(file.size_bytes);
 
@@ -474,6 +523,8 @@ pub async fn download(
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, file.content_type)
         .header(header::CONTENT_LENGTH, file.size_bytes.to_string())
+        .header(header::ETAG, etag)
+        .header(header::CACHE_CONTROL, cache_control)
         .header(
             header::CONTENT_DISPOSITION,
             content_disposition(disposition, &file.original_name),
@@ -672,6 +723,29 @@ pub async fn sign(
     }))
 }
 
+/// Restore a soft-deleted file (within the GC retention window). The blob is only
+/// guaranteed present until GC reclaims it past `GC_RETENTION_SECONDS`.
+pub async fn restore_file(
+    ctx: TenantContext,
+    State(state): State<AppState>,
+    Path(file_ref): Path<String>,
+) -> AppResult<Json<serde_json::Value>> {
+    let mut tx = state.db.begin().await?;
+    let size: Option<i64> = sqlx::query_scalar(
+        "UPDATE files SET deleted_at = NULL \
+         WHERE tenant_id = $1 AND file_ref = $2 AND deleted_at IS NOT NULL \
+         RETURNING size_bytes",
+    )
+    .bind(ctx.tenant.id)
+    .bind(&file_ref)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let size = size.ok_or(AppError::NotFound)?;
+    usage::record_restore(&mut tx, ctx.tenant.id, size).await?;
+    tx.commit().await?;
+    Ok(Json(serde_json::json!({ "success": true })))
+}
+
 pub async fn delete_file(
     ctx: TenantContext,
     State(state): State<AppState>,
@@ -738,9 +812,13 @@ mod tests {
 
     #[test]
     fn master_allowlist() {
-        assert!(master_allowed("image/png"));
-        assert!(master_allowed("application/pdf"));
-        assert!(!master_allowed("application/x-msdownload"));
-        assert!(!master_allowed("text/html"));
+        let allowed: Vec<String> = vec!["image/png".into(), "application/pdf".into()];
+        assert!(master_allowed(&allowed, "image/png"));
+        assert!(master_allowed(&allowed, "application/pdf"));
+        assert!(!master_allowed(&allowed, "text/html")); // not in allowlist
+        // allow-all (empty list) permits non-executables but never executables
+        assert!(master_allowed(&[], "video/mp4"));
+        assert!(!master_allowed(&[], "application/x-sh"));
+        assert!(!master_allowed(&allowed, "application/x-msdownload"));
     }
 }

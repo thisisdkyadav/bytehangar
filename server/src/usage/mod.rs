@@ -37,6 +37,27 @@ pub async fn record_upload(
     Ok(())
 }
 
+pub async fn record_restore(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+    bytes: i64,
+) -> AppResult<()> {
+    sqlx::query("INSERT INTO usage_events (tenant_id, op, bytes, count) VALUES ($1, 'restore', $2, 1)")
+        .bind(tenant_id)
+        .bind(bytes)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query(
+        "UPDATE usage_counters SET used_bytes = used_bytes + $2, object_count = object_count + 1, \
+            updated_at = now() WHERE tenant_id = $1",
+    )
+    .bind(tenant_id)
+    .bind(bytes)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 pub async fn record_delete(
     tx: &mut Transaction<'_, Postgres>,
     tenant_id: Uuid,
