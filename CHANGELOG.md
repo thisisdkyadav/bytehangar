@@ -3,6 +3,33 @@
 All notable changes to ByteHangar (server + `@bytehangar/sdk`) are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.1] — Adoption polish + Docker fix
+
+### Fixed
+- **Docker image (regression)**: the non-root server (uid 10001) could not write
+  blobs to a mounted `/app/data` volume — a fresh named volume mounts root-owned, so
+  the local-disk backend hit `Permission denied`. The image now creates `/app/data`
+  owned by appuser so a mounted volume inherits uid-10001 ownership. (Bind mounts
+  still require a host dir writable by uid 10001.) Caught by running the new quickstart.
+
+### Added — docs & adoption
+- **`examples/quickstart/`** — a runnable, no-Rust-toolchain quickstart: Postgres + the
+  GHCR image (local backend) via `docker compose`, plus a Node script using the
+  published `@bytehangar/sdk` that provisions → grants → uploads → downloads with a
+  byte-for-byte round-trip assert.
+- **README**: shields badges, a "Run with Docker (GHCR)" section, a complete
+  configuration table (all v1.1 env vars), corrected security wording (configurable
+  allowlist behind an inviolable denylist + `nosniff` + `Cache-Control`/`ETag`), GC
+  scheduler + audit-log in Operations, and sharper positioning. `BLOB_ALLOWED_CONTENT_TYPES`
+  added to `.env.example`.
+- **SDK README**: `createGrant({ metadata })`, `restoreFile()`, the full `FileRecord`
+  shape (incl. `actorId`/`actorRole`/`sourceService`/`entityHint`), and content-type/cache notes.
+- **Community health**: `SECURITY.md`, `CONTRIBUTING.md`, issue + PR templates.
+
+### CI
+- `release.yml` now also publishes `@bytehangar/sdk` to npm on tag (with provenance;
+  requires an `NPM_TOKEN` repository secret).
+
 ## [1.1.0] — Harden & unblock
 
 ### Added — product

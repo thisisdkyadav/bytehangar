@@ -7,6 +7,7 @@ on:
 permissions:
   contents: read
   packages: write
+  id-token: write # required for npm provenance (npm-publish job)
 
 jobs:
   image:
@@ -34,3 +35,24 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+  npm-publish:
+    name: publish SDK (npm)
+    runs-on: ubuntu-latest
+    # Requires the NPM_TOKEN repository secret: a granular/automation npm token
+    # with publish access to the @bytehangar scope. The maintainer must set it
+    # (Settings → Secrets and variables → Actions → New repository secret).
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+        working-directory: sdk
+      - run: npm run build
+        working-directory: sdk
+      - run: npm publish --provenance --access public
+        working-directory: sdk
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

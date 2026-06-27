@@ -16,10 +16,16 @@ FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd -r -u 10001 -m -d /app appuser
+    && useradd -r -u 10001 -m -d /app appuser \
+    && mkdir -p /app/data \
+    && chown -R appuser:appuser /app
 COPY --from=build /app/server/target/release/bytehangar /usr/local/bin/bytehangar
 USER appuser
 WORKDIR /app
+# /app/data exists owned by appuser in the image so a fresh named volume mounted
+# there inherits uid 10001 ownership — otherwise the non-root process gets EACCES
+# writing blobs to the local backend. (Bind mounts still need a host dir writable
+# by uid 10001.)
 # Run unprivileged; keep state writable by appuser. Restrict plane exposure at the
 # orchestration/network layer.
 ENV INTERNAL_BIND_ADDRESS=0.0.0.0 \

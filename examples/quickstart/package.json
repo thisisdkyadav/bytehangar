@@ -1,0 +1,13 @@
+{
+  "name": "bytehangar-quickstart",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Minimal copy-paste quickstart for the @bytehangar/sdk against a Dockerized server.",
+  "scripts": {
+    "start": "node index.mjs"
+  },
+  "dependencies": {
+    "@bytehangar/sdk": "^1.1.0"
+  }
+}

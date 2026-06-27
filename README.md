@@ -1,6 +1,13 @@
 # ByteHangar
 
+[![CI](https://github.com/thisisdkyadav/bytehangar/actions/workflows/ci.yml/badge.svg)](https://github.com/thisisdkyadav/bytehangar/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![npm](https://img.shields.io/npm/v/@bytehangar/sdk.svg)](https://www.npmjs.com/package/@bytehangar/sdk)
+[![GHCR](https://img.shields.io/badge/ghcr.io-bytehangar-2496ed?logo=docker&logoColor=white)](https://github.com/thisisdkyadav/bytehangar/pkgs/container/bytehangar)
+
 Open-source, self-hostable file storage + SDK — an alternative to UploadThing/Cloudinary that runs on **your** server, with **your** choice of byte backend (local disk or any S3-compatible store).
+
+**Why ByteHangar?** UploadThing and Cloudinary hold your bytes; raw S3 gives you bytes but no upload policies, grants, quotas, or SDK. ByteHangar is the control plane **and** the SDK on top of storage **you** own. Reach for it when self-hosting is a requirement — compliance, data residency, cost, or vendor independence.
 
 - **Rust** core (Axum/Tokio) — streaming, backend-always-in-path, two listeners (internal + public).
 - **Postgres** metadata; pluggable blob backends: **local disk** or **S3-compatible** (S3, MinIO, R2, B2).
@@ -60,6 +67,24 @@ docker run --rm -p 5100:5100 -p 5101:5101 \
   -e ADMIN_TOKEN=... -e MASTER_KEY=... bytehangar
 ```
 
+### Run with Docker (GHCR)
+
+Prebuilt images are published to GitHub Container Registry on every tagged release:
+
+```bash
+docker pull ghcr.io/thisisdkyadav/bytehangar:latest
+
+# ports: 5100 = public/edge plane, 5101 = internal plane (keep private)
+docker run --rm \
+  -p 5100:5100 -p 5101:5101 \
+  -e DATABASE_URL=postgres://user:pass@host:5432/bytehangar \
+  -e ADMIN_TOKEN=your-admin-token \
+  -e MASTER_KEY=your-32-byte-master-key \
+  ghcr.io/thisisdkyadav/bytehangar:latest
+```
+
+`DATABASE_URL`, `ADMIN_TOKEN`, and `MASTER_KEY` are the required env; the container needs a **reachable Postgres** (run one alongside it or point at a managed instance). For a full stack (server + Postgres + an example app) see [examples/quickstart](./examples/quickstart).
+
 ---
 
 ## SDK
@@ -93,22 +118,29 @@ Full SDK docs (incl. the React `<UploadButton>`): [sdk/README.md](./sdk/README.m
 | `ALLOWED_ORIGINS` | _(empty)_ | CSV of allowed CORS origins; empty = allow-all (dev only) |
 | `RATE_LIMIT_PER_SECOND` / `RATE_LIMIT_BURST` | `50` / `100` | Per-client-IP rate limit on the public plane; `0` disables |
 | `TRUST_FORWARDED_FOR` | `false` | Trust `X-Forwarded-For`/`X-Real-IP` for the client IP — enable **only** behind a trusted proxy |
+| `ALLOW_PRIVATE_OUTBOUND` | `false` | Allow outbound webhook / download-auth calls to private/loopback/link-local targets (disables the SSRF guard) |
 | `DATABASE_URL` | `…@localhost:5433/bytehangar` | Postgres |
+| `DB_MAX_CONNECTIONS` / `DB_MIN_CONNECTIONS` | `10` / `0` | Postgres pool size bounds |
+| `DB_ACQUIRE_TIMEOUT_SECS` | `30` | Max wait to acquire a pooled connection |
 | `STORAGE_BACKEND` | `local` | `local` or `s3` |
 | `DATA_ROOT` | `./data` | Local-disk root |
-| `S3_BUCKET` / `S3_REGION` / `S3_ENDPOINT` / `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` / `S3_FORCE_PATH_STYLE` | — | S3-compatible backend (set endpoint + path-style for MinIO/R2) |
+| `S3_BUCKET` / `S3_REGION` / `S3_ENDPOINT` / `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` / `S3_FORCE_PATH_STYLE` | — / `us-east-1` / — / — / — / `false` | S3-compatible backend (set endpoint + path-style for MinIO/R2) |
 | `MAX_UPLOAD_BYTES` | `52428800` | Inviolable global ceiling |
+| `BLOB_ALLOWED_CONTENT_TYPES` | _(empty)_ | Master content-type allowlist (CSV). Empty = `image/png,jpeg,webp,gif` + `application/pdf`; `*` = allow all except the inviolable executable/active-content denylist |
 | `ADMIN_TOKEN` | _(empty)_ | Bootstrap admin token; empty = provisioning disabled |
 | `MASTER_KEY` | _(empty)_ | Encrypts tenant secrets at rest (AES-256-GCM). **Required in production** |
 | `SIGNED_URL_TTL_SECONDS` / `PUBLIC_BASE_URL` | `300` / _(empty)_ | Signed download URLs |
+| `GC_INTERVAL_SECONDS` | `0` | Built-in GC scheduler interval; `0` disables (run GC via the endpoint/cron instead) |
+| `GC_RETENTION_SECONDS` | `86400` | Trash window — only GC files soft-deleted at least this long ago |
 
 ---
 
 ## Security model
 
 - **Grants** are HMAC-signed (per-tenant secret), short-lived, and **single-use** (nonce consumed transactionally) — a client can only perform an upload your backend authorized, within bounds it can't change.
-- **Global caps** are inviolable: a master content-type allowlist (no executables), `MAX_UPLOAD_BYTES`, and path-safe categories — enforced regardless of what a request claims.
-- **Downloads**: public files served unsigned; private files need a **signed URL** or approval from the tenant's **download-auth callback** (the server forwards the requester's `Authorization`/`Cookie`).
+- **Global caps** are inviolable: `MAX_UPLOAD_BYTES` and path-safe categories — enforced regardless of what a request claims.
+- **Content types**: the allowlist is **configurable** (`BLOB_ALLOWED_CONTENT_TYPES`; default images + pdf, `*` = allow-all) but sits behind an **inviolable denylist** that always blocks executables **and** active/render-unsafe types (`text/html`, `image/svg+xml`, `*/javascript`, xhtml/xml) — checked against both the sniffed and the declared type. All downloads send `X-Content-Type-Options: nosniff`.
+- **Downloads**: public files served unsigned; private files need a **signed URL** or approval from the tenant's **download-auth callback** (the server forwards the requester's `Authorization`/`Cookie`). Responses carry `Cache-Control` + `ETag` and honor conditional `If-None-Match` GETs (multi-value + weak validators → `304`); public files are cached `immutable`.
 - **Secrets at rest**: tenant signing + webhook secrets are AES-256-GCM encrypted when `MASTER_KEY` is set (required in production).
 - **Multi-tenant isolation**: per-tenant keys + secrets; every blob path and signature is tenant-scoped.
 - **Webhooks** are HMAC-signed (`x-bytehangar-signature: sha256=…`) and **durable** (persisted in the same transaction as the event, then retried with backoff). Delivery is **at-least-once** — dedupe on event + file_ref.
@@ -123,8 +155,9 @@ Full SDK docs (incl. the React `<UploadButton>`): [sdk/README.md](./sdk/README.m
 
 - `GET /health` — liveness; `GET /ready` — readiness (checks Postgres).
 - `GET /metrics` (internal plane) — Prometheus counters (uploads, downloads, bytes, deletes).
-- `POST /internal/v1/gc` (admin) — reclaim blobs for soft-deleted files (dedup-safe). Run on a schedule (cron).
-- **Graceful shutdown** on SIGINT/SIGTERM drains in-flight requests.
+- `POST /internal/v1/gc` (admin) — reclaim blobs for soft-deleted files (dedup-safe). Run on a schedule (cron), **or** set `GC_INTERVAL_SECONDS>0` to use the **built-in GC scheduler** (single-flight via an advisory xact lock) and skip the cron entirely. `GC_RETENTION_SECONDS` sets the trash window.
+- **Audit log**: admin/provisioning actions (tenant / key / quota / webhook / download-auth) are written to the `audit_log` table for traceability.
+- **Graceful shutdown** on SIGINT/SIGTERM drains in-flight requests (and the webhook worker).
 - Server **auto-migrates** on boot.
 
 ---

@@ -1,0 +1,66 @@
+# ByteHangar quickstart — Postgres + the published GHCR server image.
+#
+# Uses the LOCAL disk storage backend (a data volume), so there is NO MinIO/S3 to
+# run. The server auto-migrates the database on boot.
+#
+# Host ports are deliberately non-default to avoid clashing with other projects:
+#   - Postgres        -> host 5434  (container 5432)
+#   - public plane    -> host 5200  (container 5100) — browser uploads + downloads
+#   - internal plane  -> host 5201  (container 5101) — provisioning, grants, S2S
+#
+# These are DEMO secrets. Never reuse ADMIN_TOKEN / MASTER_KEY in production.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: bytehangar
+      POSTGRES_PASSWORD: bytehangar
+      POSTGRES_DB: bytehangar
+    ports:
+      - "5434:5432"
+    volumes:
+      - quickstart_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bytehangar"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  bytehangar:
+    image: ghcr.io/thisisdkyadav/bytehangar:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Postgres reached over the compose network (service name `postgres`, port 5432).
+      DATABASE_URL: postgres://bytehangar:bytehangar@postgres:5432/bytehangar
+
+      # Bootstrap admin token (enables provisioning) — the server-side SDK sends this.
+      ADMIN_TOKEN: quickstart-admin-token
+
+      # 32-byte (64 hex char) demo key that encrypts tenant secrets at rest.
+      MASTER_KEY: 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
+
+      # Local-disk blob backend (no S3/MinIO needed); persisted in a named volume.
+      STORAGE_BACKEND: local
+      DATA_ROOT: /app/data
+
+      # Bind both planes on all interfaces inside the container so the host can
+      # reach the internal plane too (the image already defaults INTERNAL to 0.0.0.0,
+      # but we set it explicitly for clarity).
+      BIND_ADDRESS: 0.0.0.0
+      INTERNAL_BIND_ADDRESS: 0.0.0.0
+
+      # The quickstart script talks to the server from the host, so signed download
+      # URLs must point back at the host-mapped public port.
+      PUBLIC_BASE_URL: http://localhost:5200
+    ports:
+      - "5200:5100" # public/edge plane
+      - "5201:5101" # internal plane
+    volumes:
+      - quickstart_data:/app/data
+
+volumes:
+  quickstart_pgdata:
+  quickstart_data:
