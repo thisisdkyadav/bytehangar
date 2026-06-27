@@ -245,6 +245,16 @@ async function main() {
   const dEvt = await Promise.race([deletedEvent, timeout(4000)]);
   check("webhook file.deleted delivered", !!dEvt && dEvt.parsed.file_ref === upWh.fileRef);
 
+  // durability: deliveries are persisted and marked delivered by the worker
+  let deliveredCount = 0;
+  for (let i = 0; i < 25; i++) {
+    const ds = await admin.listWebhookDeliveries(tenant.id);
+    deliveredCount = ds.filter((d) => d.status === "delivered").length;
+    if (deliveredCount >= 2) break;
+    await timeout(200);
+  }
+  check("durable webhook deliveries persisted + marked delivered", deliveredCount >= 2);
+
   await admin.setWebhook(tenant.id, null);
   hookServer.close();
 

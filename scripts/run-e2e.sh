@@ -14,6 +14,9 @@ export PORT="${PORT:-5180}"
 export INTERNAL_PORT="${INTERNAL_PORT:-5101}"
 export INTERNAL_BIND_ADDRESS="${INTERNAL_BIND_ADDRESS:-127.0.0.1}"
 export MASTER_KEY="${MASTER_KEY:-e2e-master-key-change-me}"
+# Keep the rate limiter enabled (exercises the middleware) but un-throttled for the suite.
+export RATE_LIMIT_PER_SECOND="${RATE_LIMIT_PER_SECOND:-100000}"
+export RATE_LIMIT_BURST="${RATE_LIMIT_BURST:-100000}"
 export STORAGE_BACKEND="${STORAGE_BACKEND:-local}"
 export DATA_ROOT="${DATA_ROOT:-$ROOT/.e2e-data}"
 

@@ -14,6 +14,7 @@ mod gc;
 mod grants;
 mod http;
 mod metrics;
+mod rate_limit;
 mod secrets;
 mod state;
 mod tenants;
@@ -55,6 +56,11 @@ async fn main() -> anyhow::Result<()> {
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()?;
+    let rate_limiter = Arc::new(rate_limit::RateLimiter::new(
+        config.rate_limit_per_second,
+        config.rate_limit_burst,
+        config.trust_forwarded_for,
+    ));
 
     let public_addr = format!("{}:{}", config.bind, config.port);
     let internal_addr = format!("{}:{}", config.internal_bind, config.internal_port);
@@ -66,16 +72,28 @@ async fn main() -> anyhow::Result<()> {
         secrets,
         http_client,
         metrics: Arc::new(metrics::Metrics::default()),
+        rate_limiter,
     };
+
+    // Background webhook delivery worker.
+    tokio::spawn(webhooks::run_worker(
+        state.db.clone(),
+        state.http_client.clone(),
+        state.secrets.clone(),
+    ));
 
     let public_listener = tokio::net::TcpListener::bind(&public_addr).await?;
     let internal_listener = tokio::net::TcpListener::bind(&internal_addr).await?;
     tracing::info!("public plane on {public_addr}, internal plane on {internal_addr}");
 
     tokio::try_join!(
-        axum::serve(public_listener, http::public_router(state.clone()))
-            .with_graceful_shutdown(shutdown_signal())
-            .into_future(),
+        axum::serve(
+            public_listener,
+            http::public_router(state.clone())
+                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown_signal())
+        .into_future(),
         axum::serve(internal_listener, http::internal_router(state))
             .with_graceful_shutdown(shutdown_signal())
             .into_future(),

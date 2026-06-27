@@ -217,6 +217,34 @@ export class ByteHangarServer {
     });
   }
 
+  /** List a tenant's recent webhook deliveries (admin). */
+  async listWebhookDeliveries(tenantId: string): Promise<
+    Array<{
+      id: number;
+      event: string;
+      status: string;
+      attempts: number;
+      createdAt: string;
+      deliveredAt: string | null;
+      lastError: string | null;
+    }>
+  > {
+    const data = await this.request<any>(
+      "GET",
+      `/internal/v1/tenants/${tenantId}/webhook-deliveries`,
+      { auth: "admin" },
+    );
+    return (data.deliveries as any[]).map((d) => ({
+      id: d.id,
+      event: d.event,
+      status: d.status,
+      attempts: d.attempts,
+      createdAt: d.created_at,
+      deliveredAt: d.delivered_at,
+      lastError: d.last_error,
+    }));
+  }
+
   /** List tenants with their usage (admin). */
   async listTenants(opts: { limit?: number; offset?: number } = {}): Promise<Page<TenantSummary>> {
     const data = await this.request<any>(

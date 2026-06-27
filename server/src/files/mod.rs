@@ -241,6 +241,21 @@ pub async fn upload(
         .await?;
 
         usage::record_upload(&mut tx, tenant_id, size).await?;
+        webhooks::enqueue(
+            &mut tx,
+            &state.secrets,
+            &tenant,
+            webhooks::EVENT_UPLOADED,
+            serde_json::json!({
+                "event": webhooks::EVENT_UPLOADED,
+                "tenant_id": tenant_id,
+                "file_ref": file_ref,
+                "category": claims.cat,
+                "content_type": content_type,
+                "size_bytes": size,
+            }),
+        )
+        .await?;
         tx.commit().await?;
         Ok(())
     }
@@ -254,20 +269,6 @@ pub async fn upload(
     }
 
     state.metrics.record_upload(size);
-
-    webhooks::dispatch(
-        state.http_client.clone(),
-        &tenant,
-        webhooks::EVENT_UPLOADED,
-        serde_json::json!({
-            "event": webhooks::EVENT_UPLOADED,
-            "tenant_id": tenant_id,
-            "file_ref": file_ref,
-            "category": claims.cat,
-            "content_type": content_type,
-            "size_bytes": size,
-        }),
-    );
 
     Ok(Json(UploadResponse {
         file_ref,
@@ -665,11 +666,9 @@ pub async fn delete_file(
     .await?;
     let deleted_size = size.ok_or(AppError::NotFound)?;
     usage::record_delete(&mut tx, ctx.tenant.id, deleted_size).await?;
-    tx.commit().await?;
-    state.metrics.record_delete();
-
-    webhooks::dispatch(
-        state.http_client.clone(),
+    webhooks::enqueue(
+        &mut tx,
+        &state.secrets,
         &ctx.tenant,
         webhooks::EVENT_DELETED,
         serde_json::json!({
@@ -677,7 +676,10 @@ pub async fn delete_file(
             "tenant_id": ctx.tenant.id,
             "file_ref": file_ref,
         }),
-    );
+    )
+    .await?;
+    tx.commit().await?;
+    state.metrics.record_delete();
 
     Ok(Json(serde_json::json!({ "success": true })))
 }

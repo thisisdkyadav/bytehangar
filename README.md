@@ -91,6 +91,8 @@ Full SDK docs (incl. the React `<UploadButton>`): [sdk/README.md](./sdk/README.m
 | `PORT` / `BIND_ADDRESS` | `5100` / `0.0.0.0` | Public/edge listener |
 | `INTERNAL_PORT` / `INTERNAL_BIND_ADDRESS` | `5101` / `127.0.0.1` | Internal listener — keep private |
 | `ALLOWED_ORIGINS` | _(empty)_ | CSV of allowed CORS origins; empty = allow-all (dev only) |
+| `RATE_LIMIT_PER_SECOND` / `RATE_LIMIT_BURST` | `50` / `100` | Per-client-IP rate limit on the public plane; `0` disables |
+| `TRUST_FORWARDED_FOR` | `false` | Trust `X-Forwarded-For`/`X-Real-IP` for the client IP — enable **only** behind a trusted proxy |
 | `DATABASE_URL` | `…@localhost:5433/bytehangar` | Postgres |
 | `STORAGE_BACKEND` | `local` | `local` or `s3` |
 | `DATA_ROOT` | `./data` | Local-disk root |
@@ -109,8 +111,9 @@ Full SDK docs (incl. the React `<UploadButton>`): [sdk/README.md](./sdk/README.m
 - **Downloads**: public files served unsigned; private files need a **signed URL** or approval from the tenant's **download-auth callback** (the server forwards the requester's `Authorization`/`Cookie`).
 - **Secrets at rest**: tenant signing + webhook secrets are AES-256-GCM encrypted when `MASTER_KEY` is set (required in production).
 - **Multi-tenant isolation**: per-tenant keys + secrets; every blob path and signature is tenant-scoped.
-- **Webhooks** are HMAC-signed (`x-bytehangar-signature: sha256=…`).
-- **Rate limiting / TLS** are delegated to your reverse proxy / ingress (nginx, Cloudflare, API gateway) — run the public plane behind one.
+- **Webhooks** are HMAC-signed (`x-bytehangar-signature: sha256=…`) and **durable** (persisted in the same transaction as the event, then retried with backoff). Delivery is **at-least-once** — dedupe on event + file_ref.
+- **Rate limiting**: built-in per-client-IP token bucket on the public `/v1` plane (`RATE_LIMIT_*`), keyed on the socket peer by default; set `TRUST_FORWARDED_FOR=true` only behind a trusted proxy. TLS and global/L7 DDoS protection still belong at the reverse proxy / ingress.
+- **Request IDs**: every request gets a server-assigned `x-request-id`, echoed on the response and in logs.
 
 ---
 

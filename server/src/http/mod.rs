@@ -5,39 +5,81 @@
 //!   /v1/*           — public/edge: grant-authorized upload, signed download
 //!   /health         — liveness
 
+use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, State};
-use axum::http::{HeaderValue, StatusCode};
-use axum::response::IntoResponse;
+use axum::http::{HeaderName, HeaderValue, Request, StatusCode};
+use axum::middleware::{from_fn, Next};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
 use serde_json::{json, Value};
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
 
 use crate::state::AppState;
 use crate::{catalog, files, gc, grants, tenants, usage};
 
+const REQUEST_ID_HEADER: &str = "x-request-id";
+
+/// Attach a request id (generated if absent), echo it on the response, and put it
+/// in the per-request tracing span so it appears in every log line.
+fn telemetry(router: Router<AppState>) -> Router<AppState> {
+    let header = HeaderName::from_static(REQUEST_ID_HEADER);
+    router
+        .layer(PropagateRequestIdLayer::new(header.clone()))
+        .layer(TraceLayer::new_for_http().make_span_with(|request: &Request<Body>| {
+            let request_id = request
+                .headers()
+                .get(REQUEST_ID_HEADER)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("");
+            tracing::info_span!(
+                "http",
+                request_id = %request_id,
+                method = %request.method(),
+                path = %request.uri().path(),
+            )
+        }))
+        .layer(SetRequestIdLayer::new(header, MakeRequestUuid))
+        // Outermost: drop any client-supplied id so the server always assigns its own.
+        .layer(from_fn(regenerate_request_id))
+}
+
+async fn regenerate_request_id(mut request: Request<Body>, next: Next) -> Response {
+    request.headers_mut().remove(REQUEST_ID_HEADER);
+    next.run(request).await
+}
+
 /// Internal plane: key/admin auth. Bind privately (loopback or a private network).
 pub fn internal_router(state: AppState) -> Router {
-    Router::new()
-        .route("/health", get(health))
-        .route("/ready", get(ready))
-        .route("/metrics", get(metrics_handler))
-        .nest("/internal/v1", internal_routes())
-        .layer(TraceLayer::new_for_http())
-        .with_state(state)
+    telemetry(
+        Router::new()
+            .route("/health", get(health))
+            .route("/ready", get(ready))
+            .route("/metrics", get(metrics_handler))
+            .nest("/internal/v1", internal_routes()),
+    )
+    .with_state(state)
 }
 
 /// Public/edge plane: browser-facing (grant upload, signed download).
 pub fn public_router(state: AppState) -> Router {
     let cors = build_cors(&state.config.allowed_origins);
-    Router::new()
-        .route("/health", get(health))
-        .route("/ready", get(ready))
-        .nest("/v1", public_routes())
-        .layer(cors)
-        .layer(TraceLayer::new_for_http())
-        .with_state(state)
+    let rate_limit = axum::middleware::from_fn_with_state(
+        state.rate_limiter.clone(),
+        crate::rate_limit::middleware,
+    );
+    // Rate limiting covers the /v1 edge only — health/readiness probes are exempt.
+    let edge = public_routes().layer(rate_limit);
+    telemetry(
+        Router::new()
+            .route("/health", get(health))
+            .route("/ready", get(ready))
+            .nest("/v1", edge)
+            .layer(cors),
+    )
+    .with_state(state)
 }
 
 /// Restrict CORS to configured origins; allow-all only when none are set (dev).
@@ -64,6 +106,10 @@ fn internal_routes() -> Router<AppState> {
         .route("/tenants/{id}/quota", patch(tenants::set_quota))
         .route("/tenants/{id}/download-auth", patch(tenants::set_download_auth))
         .route("/tenants/{id}/webhook", patch(tenants::set_webhook))
+        .route(
+            "/tenants/{id}/webhook-deliveries",
+            get(tenants::list_webhook_deliveries),
+        )
         .route("/gc", post(gc::gc_handler))
         // tenant control plane (tenant key)
         .route("/catalog", put(catalog::register_catalog))

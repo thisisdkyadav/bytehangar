@@ -227,6 +227,33 @@ pub async fn list_tenants(
 }
 
 #[derive(Serialize, sqlx::FromRow)]
+pub struct WebhookDeliverySummary {
+    pub id: i64,
+    pub event: String,
+    pub status: String,
+    pub attempts: i32,
+    pub created_at: DateTime<Utc>,
+    pub delivered_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+}
+
+/// List a tenant's recent webhook deliveries (admin) — for observability.
+pub async fn list_webhook_deliveries(
+    _admin: AdminAuth,
+    State(state): State<AppState>,
+    Path(tenant_id): Path<Uuid>,
+) -> AppResult<Json<serde_json::Value>> {
+    let deliveries = sqlx::query_as::<_, WebhookDeliverySummary>(
+        "SELECT id, event, status, attempts, created_at, delivered_at, last_error \
+         FROM webhook_deliveries WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 50",
+    )
+    .bind(tenant_id)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(serde_json::json!({ "deliveries": deliveries })))
+}
+
+#[derive(Serialize, sqlx::FromRow)]
 pub struct ApiKeySummary {
     pub id: Uuid,
     pub name: String,

@@ -48,6 +48,13 @@ pub struct Config {
     pub environment: String,
     /// Allowed CORS origins for the public plane. Empty => allow-all (dev only).
     pub allowed_origins: Vec<String>,
+    /// Per-client-IP rate limit on the public plane (tokens/sec). 0 => disabled.
+    pub rate_limit_per_second: u32,
+    /// Burst capacity for the public-plane rate limiter.
+    pub rate_limit_burst: u32,
+    /// Trust X-Forwarded-For / X-Real-IP for the client IP. Enable ONLY behind a
+    /// trusted proxy; otherwise the limiter keys on the (unspoofable) socket peer.
+    pub trust_forwarded_for: bool,
 }
 
 impl Config {
@@ -102,6 +109,9 @@ impl Config {
             master_key,
             environment,
             allowed_origins: split_csv(&env_string("ALLOWED_ORIGINS", "")),
+            rate_limit_per_second: env_parse("RATE_LIMIT_PER_SECOND", 50)?,
+            rate_limit_burst: env_parse("RATE_LIMIT_BURST", 100)?,
+            trust_forwarded_for: env_parse("TRUST_FORWARDED_FOR", false)?,
         })
     }
 }
