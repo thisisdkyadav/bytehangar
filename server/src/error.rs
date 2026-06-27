@@ -15,6 +15,8 @@ pub enum AppError {
     Forbidden,
     #[error("Not found")]
     NotFound,
+    #[error("Gone")]
+    Gone,
     #[error("Payload too large")]
     PayloadTooLarge,
     #[error("Not implemented")]
@@ -30,6 +32,7 @@ impl AppError {
             AppError::Unauthorized => StatusCode::UNAUTHORIZED,
             AppError::Forbidden => StatusCode::FORBIDDEN,
             AppError::NotFound => StatusCode::NOT_FOUND,
+            AppError::Gone => StatusCode::GONE,
             AppError::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             AppError::NotImplemented => StatusCode::NOT_IMPLEMENTED,
             AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,

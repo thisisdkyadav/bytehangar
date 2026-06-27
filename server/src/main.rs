@@ -106,6 +106,9 @@ async fn main() -> anyhow::Result<()> {
         shutdown_rx.clone(),
     ));
 
+    // Always-on upload_grants pruner (grants accrue regardless of GC config).
+    tokio::spawn(gc::run_grant_pruner(state.db.clone(), shutdown_rx.clone()));
+
     // Optional internal GC scheduler.
     if state.config.gc_interval_secs > 0 {
         tracing::info!(
@@ -138,8 +141,9 @@ async fn main() -> anyhow::Result<()> {
             .into_future(),
     )?;
 
-    // Let the webhook worker finish any in-flight batch.
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), worker).await;
+    // Let the webhook worker finish any in-flight batch. The bound must exceed the
+    // worst-case batch wall-clock (BATCH/concurrency * per-request timeout + margin).
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(30), worker).await;
     tracing::info!("shutdown complete");
     Ok(())
 }

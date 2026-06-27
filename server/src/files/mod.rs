@@ -26,8 +26,11 @@ use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use crate::{tenants, usage, webhooks};
 
-/// Inviolable denylist — these sniffed types are rejected regardless of config.
-const EXECUTABLE_DENYLIST: &[&str] = &[
+/// Inviolable denylist — these types are rejected regardless of the allowlist:
+/// native executables/scripts AND active/render-unsafe types (stored-XSS vectors
+/// when served inline from the storage origin).
+const DENYLIST: &[&str] = &[
+    // executables / scripts
     "application/vnd.microsoft.portable-executable",
     "application/x-msdownload",
     "application/x-executable",
@@ -36,15 +39,28 @@ const EXECUTABLE_DENYLIST: &[&str] = &[
     "application/x-dosexec",
     "application/x-sh",
     "text/x-shellscript",
+    // active content (browser-renderable) — never store/serve these
+    "text/html",
+    "application/xhtml+xml",
+    "image/svg+xml",
+    "text/xml",
+    "application/xml",
+    "text/javascript",
+    "application/javascript",
+    "application/ecmascript",
 ];
 
 /// Bytes buffered up-front for magic-byte content sniffing.
 const SNIFF_LEN: usize = 8192;
 
-/// A sniffed content type is allowed if it is not an executable and either the
-/// configured allowlist is empty (allow-all) or contains it.
+fn is_denylisted(content_type: &str) -> bool {
+    DENYLIST.contains(&content_type)
+}
+
+/// A content type is allowed if it is not denylisted and either the configured
+/// allowlist is empty (allow-all) or contains it.
 fn master_allowed(allowed: &[String], content_type: &str) -> bool {
-    if EXECUTABLE_DENYLIST.contains(&content_type) {
+    if is_denylisted(content_type) {
         return false;
     }
     allowed.is_empty() || allowed.iter().any(|t| t == content_type)
@@ -342,6 +358,13 @@ async fn stream_field(
 
     // 2. Resolve + enforce content type before writing anything.
     let sniffed = infer::get(&head).map(|t| t.mime_type().to_string());
+    // Reject if EITHER the sniffed or the client-declared type is denylisted, so a
+    // safe sniff can't mask a dangerous declared type (used when sniffing fails).
+    if sniffed.as_deref().map(is_denylisted).unwrap_or(false)
+        || declared_ct.as_deref().map(is_denylisted).unwrap_or(false)
+    {
+        return Err(AppError::Forbidden);
+    }
     let content_type = sniffed
         .or(declared_ct)
         .unwrap_or_else(|| "application/octet-stream".to_string());
@@ -491,23 +514,20 @@ pub async fn download(
 
     // Content is immutable per file_ref, so ETag = checksum + conditional GET.
     let etag = format!("\"{}\"", file.checksum_sha256);
-    if headers
-        .get(header::IF_NONE_MATCH)
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value == etag || value == "*")
-        .unwrap_or(false)
-    {
-        return Response::builder()
-            .status(StatusCode::NOT_MODIFIED)
-            .header(header::ETAG, &etag)
-            .body(Body::empty())
-            .map_err(|err| AppError::Internal(err.to_string()));
-    }
     let cache_control = if file.visibility == "public" {
         "public, max-age=31536000, immutable"
     } else {
         "private, max-age=0, must-revalidate"
     };
+    if if_none_match_matches(&headers, &etag) {
+        return Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header(header::ETAG, &etag)
+            .header(header::CACHE_CONTROL, cache_control)
+            .header("x-content-type-options", "nosniff")
+            .body(Body::empty())
+            .map_err(|err| AppError::Internal(err.to_string()));
+    }
 
     let stream = state.blob.open_reader(&file.stored_key).await?;
     state.metrics.record_download(file.size_bytes);
@@ -525,12 +545,27 @@ pub async fn download(
         .header(header::CONTENT_LENGTH, file.size_bytes.to_string())
         .header(header::ETAG, etag)
         .header(header::CACHE_CONTROL, cache_control)
+        .header("x-content-type-options", "nosniff")
         .header(
             header::CONTENT_DISPOSITION,
             content_disposition(disposition, &file.original_name),
         )
         .body(Body::from_stream(stream))
         .map_err(|err| AppError::Internal(err.to_string()))
+}
+
+/// Match an `If-None-Match` header (handles comma-separated lists, weak `W/` prefix, `*`).
+fn if_none_match_matches(headers: &HeaderMap, etag: &str) -> bool {
+    headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| {
+            value.split(',').any(|entry| {
+                let entry = entry.trim().trim_start_matches("W/").trim();
+                entry == "*" || entry == etag
+            })
+        })
+        .unwrap_or(false)
 }
 
 /// Ask the tenant's callback whether this request may download a private file.
@@ -671,6 +706,7 @@ pub async fn content(
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, file.content_type)
         .header(header::CONTENT_LENGTH, file.size_bytes.to_string())
+        .header("x-content-type-options", "nosniff")
         .body(Body::from_stream(stream))
         .map_err(|err| AppError::Internal(err.to_string()))
 }
@@ -723,24 +759,56 @@ pub async fn sign(
     }))
 }
 
-/// Restore a soft-deleted file (within the GC retention window). The blob is only
-/// guaranteed present until GC reclaims it past `GC_RETENTION_SECONDS`.
+/// Restore a soft-deleted file (within the GC retention window). Safe against a
+/// concurrent reclaim: we take the GC advisory lock, re-verify the blob still
+/// exists, and enforce the quota before re-crediting usage. Returns 410 Gone if
+/// the blob was already reclaimed.
 pub async fn restore_file(
     ctx: TenantContext,
     State(state): State<AppState>,
     Path(file_ref): Path<String>,
 ) -> AppResult<Json<serde_json::Value>> {
     let mut tx = state.db.begin().await?;
-    let size: Option<i64> = sqlx::query_scalar(
+    // Serialize with GC (same key) so a reclaim can't delete the blob between our
+    // existence check and commit. Blocking: waits out any in-flight GC run.
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(crate::gc::GC_ADVISORY_LOCK)
+        .execute(&mut *tx)
+        .await?;
+
+    let row: Option<(i64, String)> = sqlx::query_as(
         "UPDATE files SET deleted_at = NULL \
          WHERE tenant_id = $1 AND file_ref = $2 AND deleted_at IS NOT NULL \
-         RETURNING size_bytes",
+         RETURNING size_bytes, stored_key",
     )
     .bind(ctx.tenant.id)
     .bind(&file_ref)
     .fetch_optional(&mut *tx)
     .await?;
-    let size = size.ok_or(AppError::NotFound)?;
+    let (size, stored_key) = row.ok_or(AppError::NotFound)?;
+
+    // Refuse to resurrect a row whose bytes GC already reclaimed (and never credit
+    // usage for them). Any early return drops the tx, rolling back the un-delete.
+    match state.blob.stat(&stored_key).await {
+        Ok(_) => {}
+        Err(AppError::NotFound) => return Err(AppError::Gone),
+        Err(err) => return Err(err),
+    }
+
+    // Re-crediting usage must respect the quota ceiling, same as upload.
+    if ctx.tenant.quota_bytes > 0 {
+        let used: i64 = sqlx::query_scalar(
+            "SELECT used_bytes FROM usage_counters WHERE tenant_id = $1 FOR UPDATE",
+        )
+        .bind(ctx.tenant.id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .unwrap_or(0);
+        if used + size > ctx.tenant.quota_bytes {
+            return Err(AppError::BadRequest("storage quota exceeded".into()));
+        }
+    }
+
     usage::record_restore(&mut tx, ctx.tenant.id, size).await?;
     tx.commit().await?;
     Ok(Json(serde_json::json!({ "success": true })))
@@ -786,6 +854,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn if_none_match_handles_lists_and_weak_validators() {
+        let etag = "\"abc\"";
+        let with = |v: &str| {
+            let mut h = HeaderMap::new();
+            h.insert(header::IF_NONE_MATCH, v.parse().unwrap());
+            if_none_match_matches(&h, etag)
+        };
+        assert!(with("\"abc\""));
+        assert!(with("\"xyz\", W/\"abc\"")); // comma list + weak prefix
+        assert!(with("*"));
+        assert!(!with("\"nomatch\""));
+        assert!(!if_none_match_matches(&HeaderMap::new(), etag));
+    }
+
+    #[test]
     fn content_disposition_blocks_header_injection() {
         let cd = content_disposition("inline", "evil\"\r\nX-Bad: 1.png");
         assert!(!cd.contains('\r'));
@@ -815,10 +898,14 @@ mod tests {
         let allowed: Vec<String> = vec!["image/png".into(), "application/pdf".into()];
         assert!(master_allowed(&allowed, "image/png"));
         assert!(master_allowed(&allowed, "application/pdf"));
-        assert!(!master_allowed(&allowed, "text/html")); // not in allowlist
-        // allow-all (empty list) permits non-executables but never executables
+        assert!(!master_allowed(&allowed, "text/plain")); // not in allowlist
+        // allow-all (empty list) permits non-executables but never denylisted types
         assert!(master_allowed(&[], "video/mp4"));
         assert!(!master_allowed(&[], "application/x-sh"));
         assert!(!master_allowed(&allowed, "application/x-msdownload"));
+        // render-unsafe (stored-XSS) types denied even in allow-all
+        assert!(!master_allowed(&[], "text/html"));
+        assert!(!master_allowed(&[], "image/svg+xml"));
+        assert!(!master_allowed(&[], "application/javascript"));
     }
 }
