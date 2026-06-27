@@ -34,13 +34,21 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let config = Config::from_env()?;
-    let db = db::connect(&config.database_url)?;
+    let db = db::connect(&config)?;
 
     // Self-migrate on boot. Best-effort: if the DB is unreachable the server still
     // comes up and serves /health (the pool connects lazily on first real query).
     match sqlx::migrate!("./migrations").run(&db).await {
         Ok(()) => tracing::info!("migrations applied"),
         Err(err) => tracing::warn!("migrations not applied (database unavailable?): {err}"),
+    }
+
+    // Fail fast on an unreachable database in production.
+    if let Err(err) = sqlx::query("SELECT 1").execute(&db).await {
+        if config.is_production() {
+            return Err(anyhow::anyhow!("database is not reachable: {err}"));
+        }
+        tracing::warn!("database not reachable at startup: {err}");
     }
 
     let blob = blob::from_config(&config)?;
@@ -78,13 +86,39 @@ async fn main() -> anyhow::Result<()> {
         rate_limiter,
     };
 
-    // Background webhook delivery worker.
-    tokio::spawn(webhooks::run_worker(
+    // One shutdown signal flips a watch that the serves and background workers observe.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    tokio::spawn({
+        let tx = shutdown_tx.clone();
+        async move {
+            shutdown_signal().await;
+            let _ = tx.send(true);
+        }
+    });
+
+    // Background webhook delivery worker (drains in-flight on shutdown).
+    let worker = tokio::spawn(webhooks::run_worker(
         state.db.clone(),
         state.http_client.clone(),
         state.secrets.clone(),
         state.config.allow_private_outbound,
+        shutdown_rx.clone(),
     ));
+
+    // Optional internal GC scheduler.
+    if state.config.gc_interval_secs > 0 {
+        tracing::info!(
+            "internal GC scheduler enabled (every {}s)",
+            state.config.gc_interval_secs
+        );
+        tokio::spawn(gc::run_scheduler(
+            state.db.clone(),
+            state.blob.clone(),
+            state.config.gc_interval_secs,
+            state.config.gc_retention_secs,
+            shutdown_rx.clone(),
+        ));
+    }
 
     let public_listener = tokio::net::TcpListener::bind(&public_addr).await?;
     let internal_listener = tokio::net::TcpListener::bind(&internal_addr).await?;
@@ -96,14 +130,21 @@ async fn main() -> anyhow::Result<()> {
             http::public_router(state.clone())
                 .into_make_service_with_connect_info::<std::net::SocketAddr>(),
         )
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(wait_for_shutdown(shutdown_rx.clone()))
         .into_future(),
         axum::serve(internal_listener, http::internal_router(state))
-            .with_graceful_shutdown(shutdown_signal())
+            .with_graceful_shutdown(wait_for_shutdown(shutdown_rx.clone()))
             .into_future(),
     )?;
 
+    // Let the webhook worker finish any in-flight batch.
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), worker).await;
+    tracing::info!("shutdown complete");
     Ok(())
+}
+
+async fn wait_for_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
+    let _ = rx.wait_for(|value| *value).await;
 }
 
 /// Resolve when the process receives SIGINT (Ctrl-C) or SIGTERM, so in-flight

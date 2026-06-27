@@ -75,19 +75,28 @@ struct DueDelivery {
     attempts: i32,
 }
 
-/// Background worker loop. Spawn once at startup.
+/// Background worker loop. Spawn once at startup. Drains the in-flight batch and
+/// stops when `shutdown` flips to true.
 pub async fn run_worker(
     db: PgPool,
     client: reqwest::Client,
     secrets: Arc<Secrets>,
     allow_private: bool,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
     loop {
+        if *shutdown.borrow() {
+            break;
+        }
         if let Err(err) = process_batch(&db, &client, &secrets, allow_private).await {
             tracing::error!("webhook worker error: {err}");
         }
-        tokio::time::sleep(StdDuration::from_secs(POLL_INTERVAL_SECS)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(StdDuration::from_secs(POLL_INTERVAL_SECS)) => {}
+            _ = shutdown.changed() => {}
+        }
     }
+    tracing::info!("webhook worker stopped");
 }
 
 async fn process_batch(

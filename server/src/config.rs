@@ -58,6 +58,13 @@ pub struct Config {
     /// Allow outbound webhook / download-auth-callback requests to private,
     /// loopback, and link-local targets. Default false (SSRF guard on).
     pub allow_private_outbound: bool,
+    pub db_max_connections: u32,
+    pub db_min_connections: u32,
+    pub db_acquire_timeout_secs: u64,
+    /// Interval for the internal GC scheduler. 0 => disabled (run GC via the endpoint).
+    pub gc_interval_secs: u64,
+    /// Only GC files soft-deleted at least this long ago (the trash retention window).
+    pub gc_retention_secs: i64,
 }
 
 impl Config {
@@ -71,6 +78,13 @@ impl Config {
         let environment = env_string("APP_ENV", "development");
         let master_key = env_string("MASTER_KEY", "");
         let admin_token = env_string("ADMIN_TOKEN", "");
+        let port: u16 = env_parse("PORT", 5100)?;
+        let internal_port: u16 = env_parse("INTERNAL_PORT", 5101)?;
+        if port == internal_port {
+            return Err(AppError::Internal(
+                "PORT and INTERNAL_PORT must differ".into(),
+            ));
+        }
         if environment == "production" {
             if master_key.is_empty() {
                 return Err(AppError::Internal(
@@ -84,8 +98,8 @@ impl Config {
             }
         }
         Ok(Self {
-            port: env_parse("PORT", 5100)?,
-            internal_port: env_parse("INTERNAL_PORT", 5101)?,
+            port,
+            internal_port,
             database_url: env_string(
                 "DATABASE_URL",
                 "postgres://bytehangar:bytehangar@localhost:5433/bytehangar",
@@ -124,6 +138,11 @@ impl Config {
             rate_limit_burst: env_parse("RATE_LIMIT_BURST", 100)?,
             trust_forwarded_for: env_parse("TRUST_FORWARDED_FOR", false)?,
             allow_private_outbound: env_parse("ALLOW_PRIVATE_OUTBOUND", false)?,
+            db_max_connections: env_parse("DB_MAX_CONNECTIONS", 10)?,
+            db_min_connections: env_parse("DB_MIN_CONNECTIONS", 0)?,
+            db_acquire_timeout_secs: env_parse("DB_ACQUIRE_TIMEOUT_SECS", 30)?,
+            gc_interval_secs: env_parse("GC_INTERVAL_SECONDS", 0)?,
+            gc_retention_secs: env_parse("GC_RETENTION_SECONDS", 86400)?,
         })
     }
 }

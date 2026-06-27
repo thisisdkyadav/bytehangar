@@ -10,6 +10,9 @@
 //! at all (e.g. from a crash mid-upload) need a store-listing reconcile — a
 //! separate, backend-specific sweep, not handled here.
 
+use std::sync::Arc;
+use std::time::Duration as StdDuration;
+
 use axum::extract::State;
 use axum::Json;
 use chrono::{Duration, Utc};
@@ -21,6 +24,9 @@ use crate::auth::AdminAuth;
 use crate::blob::BlobBackend;
 use crate::error::AppResult;
 use crate::state::AppState;
+
+/// Fixed key for the GC advisory lock (serializes GC across workers/instances).
+const GC_ADVISORY_LOCK: i64 = 4_271_990_001;
 
 #[derive(Deserialize)]
 pub struct GcRequest {
@@ -38,7 +44,36 @@ pub struct GcReport {
     pub rows_purged: u64,
 }
 
+/// Run GC under a Postgres advisory lock so concurrent runs (multiple workers /
+/// instances, or the scheduler racing the admin endpoint) can't overlap. Returns
+/// an empty report when another GC already holds the lock.
 pub async fn run_gc(
+    db: &PgPool,
+    blob: &dyn BlobBackend,
+    tenant_id: Option<Uuid>,
+    older_than_seconds: i64,
+) -> AppResult<GcReport> {
+    let mut lock = db.acquire().await?;
+    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+        .bind(GC_ADVISORY_LOCK)
+        .fetch_one(&mut *lock)
+        .await?;
+    if !acquired {
+        return Ok(GcReport {
+            blobs_deleted: 0,
+            rows_purged: 0,
+        });
+    }
+    let result = run_gc_inner(db, blob, tenant_id, older_than_seconds).await;
+    // Release on the same session connection (must run before `lock` returns to the pool).
+    let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(GC_ADVISORY_LOCK)
+        .execute(&mut *lock)
+        .await;
+    result
+}
+
+async fn run_gc_inner(
     db: &PgPool,
     blob: &dyn BlobBackend,
     tenant_id: Option<Uuid>,
@@ -111,4 +146,42 @@ pub async fn gc_handler(
     )
     .await?;
     Ok(Json(report))
+}
+
+/// Internal GC scheduler: periodically reclaims soft-deleted blobs (past the
+/// retention window) and prunes consumed/expired upload grants. Stops on shutdown.
+pub async fn run_scheduler(
+    db: PgPool,
+    blob: Arc<dyn BlobBackend>,
+    interval_secs: u64,
+    retention_secs: i64,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(StdDuration::from_secs(interval_secs)) => {}
+            _ = shutdown.changed() => {}
+        }
+        if *shutdown.borrow() {
+            break;
+        }
+
+        match run_gc(&db, blob.as_ref(), None, retention_secs).await {
+            Ok(report) if report.blobs_deleted > 0 || report.rows_purged > 0 => tracing::info!(
+                "scheduled GC: {} blobs reclaimed, {} rows purged",
+                report.blobs_deleted,
+                report.rows_purged
+            ),
+            Ok(_) => {}
+            Err(err) => tracing::error!("scheduled GC failed: {err}"),
+        }
+
+        // Prune consumed or long-expired upload grants.
+        let _ = sqlx::query(
+            "DELETE FROM upload_grants WHERE consumed_at IS NOT NULL OR expires_at < now() - interval '1 day'",
+        )
+        .execute(&db)
+        .await;
+    }
+    tracing::info!("GC scheduler stopped");
 }
