@@ -59,6 +59,7 @@ export class ByteHangarServer {
           max_size_bytes: p.maxSizeBytes,
           allow_content_types: p.allowContentTypes ?? [],
           visibility: p.visibility,
+          transforms: p.transforms ?? {},
         })),
       },
     });
@@ -104,7 +105,12 @@ export class ByteHangarServer {
   /** Mint a signed download URL for a file. */
   async signDownload(
     fileRef: string,
-    opts: { expiresInSeconds?: number; disposition?: "inline" | "attachment" } = {},
+    opts: {
+      expiresInSeconds?: number;
+      disposition?: "inline" | "attachment";
+      /** Sign a URL for a named image transform preset instead of the original. */
+      variant?: string;
+    } = {},
   ): Promise<SignResult> {
     const data = await this.request<any>(
       "POST",
@@ -114,6 +120,7 @@ export class ByteHangarServer {
         body: {
           expires_in_seconds: opts.expiresInSeconds,
           disposition: opts.disposition,
+          variant: opts.variant,
         },
       },
     );

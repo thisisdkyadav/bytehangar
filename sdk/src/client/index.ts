@@ -35,8 +35,12 @@ export class ByteHangarClient {
    * PUBLIC files; for private files the request must also carry a signature (see
    * server `signDownload`) or credentials the tenant's download-auth callback accepts.
    */
-  fileUrl(tenantId: string, fileRef: string): string {
-    return `${this.baseUrl}/v1/files/${encodeURIComponent(fileRef)}?t=${encodeURIComponent(tenantId)}`;
+  fileUrl(tenantId: string, fileRef: string, opts: { variant?: string } = {}): string {
+    let url = `${this.baseUrl}/v1/files/${encodeURIComponent(fileRef)}?t=${encodeURIComponent(tenantId)}`;
+    if (opts.variant) {
+      url += `&variant=${encodeURIComponent(opts.variant)}`;
+    }
+    return url;
   }
 
   /**

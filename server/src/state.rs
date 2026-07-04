@@ -19,4 +19,6 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     pub metrics: Arc<Metrics>,
     pub rate_limiter: Arc<RateLimiter>,
+    /// Bounds concurrent (CPU-bound) image-variant renders.
+    pub render_sem: Arc<tokio::sync::Semaphore>,
 }

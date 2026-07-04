@@ -1,6 +1,25 @@
 // Public types shared by the server and client SDK entry points.
 // (No runtime code, no secrets — safe to import from either side.)
 
+/** How an image is fit into the requested box. */
+export type TransformFit = "cover" | "inside" | "fill";
+/** Output format for a rendered variant (pure-Rust encoders). */
+export type TransformFormat = "jpeg" | "png" | "webp";
+
+/** A named image transform preset. At least one of `w`/`h` is required. */
+export interface TransformPreset {
+  /** Target width (px). */
+  w?: number;
+  /** Target height (px). */
+  h?: number;
+  /** Fit mode; defaults to "cover" (scale + center-crop). */
+  fit?: TransformFit;
+  /** Output format. */
+  fmt: TransformFormat;
+  /** JPEG/WebP quality 1..=100 (ignored for PNG). */
+  q?: number;
+}
+
 /** A policy the app registers at boot. The enforceable upload rule. */
 export interface PolicyDefinition {
   /** Stable identifier the app refers to, e.g. "profile-image". */
@@ -13,6 +32,13 @@ export interface PolicyDefinition {
   allowContentTypes?: string[];
   /** "public" (served without a signature) or "private" (default). */
   visibility?: "public" | "private";
+  /**
+   * Named image transform presets, e.g.
+   * `{ thumb: { w: 256, h: 256, fit: "cover", fmt: "webp", q: 80 } }`.
+   * Reference a preset on download via `signDownload(ref, { variant: "thumb" })`
+   * or `client.fileUrl(t, ref, { variant: "thumb" })`. Rendered lazily + cached.
+   */
+  transforms?: Record<string, TransformPreset>;
 }
 
 export interface RegisterCatalogResult {

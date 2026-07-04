@@ -3,6 +3,28 @@
 All notable changes to ByteHangar (server + `@bytehangar/sdk`) are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] — Image transforms
+
+### Added
+- **On-the-fly image transforms** — the headline v1.2 feature. Register **named
+  presets** per policy (`transforms: { thumb: { w, h, fit, fmt, q } }`) and reference
+  one on download via `signDownload(ref, { variant })` (private) or
+  `client.fileUrl(t, ref, { variant })` (public). Pure-Rust engine (`image` crate; no
+  libvips): decode with anti-decode-bomb limits → resize (`cover`/`inside`/`fill`) →
+  encode to `jpeg`/`png`/`webp`.
+  - **Lazy + cached**: first request renders; the result is stored as a
+    content-addressed sibling blob (keyed on original + preset spec) and served on
+    subsequent requests with its own `ETag`/immutable cache headers. Deduped originals
+    share variants; a redefined preset re-renders automatically; a missing cached blob
+    self-heals.
+  - **Render-DoS guard**: only the named, bounded presets can be produced; a semaphore
+    (`IMAGE_RENDER_CONCURRENCY`) caps concurrent CPU-bound renders.
+  - **Signed surface**: the variant is folded into the signed URL, so a `thumb`
+    signature can't fetch `banner` or the original.
+  - **GC**: variant blobs are reclaimed together with the parent's blob (dedup-safe).
+  - SDK: `PolicyDefinition.transforms`, `signDownload({ variant })`,
+    `fileUrl(t, ref, { variant })`.
+
 ## [1.1.1] — Adoption polish + Docker fix
 
 ### Fixed

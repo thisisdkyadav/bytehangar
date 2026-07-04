@@ -18,13 +18,16 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use futures::StreamExt;
+
 use crate::auth::{GrantContext, TenantContext};
 use crate::blob::BlobBackend;
 use crate::crypto;
 use crate::domain::GrantClaims;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
-use crate::{tenants, usage, webhooks};
+use crate::transform::{self, OutFormat, Preset};
+use crate::{catalog, tenants, usage, webhooks};
 
 /// Inviolable denylist — these types are rejected regardless of the allowlist:
 /// native executables/scripts AND active/render-unsafe types (stored-XSS vectors
@@ -451,6 +454,9 @@ pub struct DownloadQuery {
     sig: Option<String>,
     #[serde(default)]
     disposition: Option<String>,
+    /// Named image transform preset to render/serve instead of the original.
+    #[serde(default)]
+    variant: Option<String>,
 }
 
 pub async fn download(
@@ -475,6 +481,7 @@ pub async fn download(
         Some("attachment") => "attachment",
         _ => "inline",
     };
+    let variant = query.variant.as_deref().filter(|v| !v.is_empty());
 
     // Public files need no authorization. Private files need a valid signed URL
     // or, failing that, approval from the tenant's download-auth callback.
@@ -488,6 +495,7 @@ pub async fn download(
                     &file_ref,
                     exp,
                     disposition,
+                    variant,
                     sig,
                 )
             {
@@ -510,6 +518,11 @@ pub async fn download(
         if !authorized {
             return Err(AppError::Unauthorized);
         }
+    }
+
+    // Image variant: render (or serve cached) a named transform preset instead.
+    if let Some(variant) = variant {
+        return serve_variant(&state, tenant_id, &file, variant, disposition, &headers).await;
     }
 
     // Content is immutable per file_ref, so ETag = checksum + conditional GET.
@@ -566,6 +579,183 @@ fn if_none_match_matches(headers: &HeaderMap, etag: &str) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+/// Resolve, render-on-miss, and serve a named image variant. Auth was already
+/// enforced by the caller (the variant is folded into the signed URL for private files).
+async fn serve_variant(
+    state: &AppState,
+    tenant_id: Uuid,
+    file: &FileRecord,
+    variant: &str,
+    disposition: &str,
+    headers: &HeaderMap,
+) -> AppResult<Response> {
+    // The preset must be registered on the file's policy (bounds public requests too).
+    let policy = catalog::find_policy(&state.db, tenant_id, &file.policy_key)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let preset = policy
+        .transforms
+        .0
+        .get(variant)
+        .ok_or(AppError::NotFound)?
+        .clone();
+
+    if !file.content_type.starts_with("image/") {
+        return Err(AppError::BadRequest(
+            "variants apply only to image files".into(),
+        ));
+    }
+
+    // Content-addressed on the ORIGINAL stored_key + preset spec: deduped originals
+    // share a variant blob, and a redefined preset yields a new key (auto re-render).
+    let variant_key = format!(
+        "variants/{}",
+        crypto::sha256_hex(format!("{}|{}", file.stored_key, preset.cache_signature()).as_bytes())
+    );
+
+    let existing: Option<(String, String, i64, String)> = sqlx::query_as(
+        "SELECT stored_key, content_type, size_bytes, checksum_sha256 \
+         FROM file_variants WHERE file_id = $1 AND preset_key = $2",
+    )
+    .bind(file.id)
+    .bind(variant)
+    .fetch_optional(&state.db)
+    .await?;
+
+    let (content_type, size_bytes, checksum) = match existing {
+        Some((sk, ct, sz, cs)) if sk == variant_key => (ct, sz, cs),
+        _ => render_and_cache(state, tenant_id, file, variant, &preset, &variant_key).await?,
+    };
+
+    let etag = format!("\"{checksum}\"");
+    let cache_control = if file.visibility == "public" {
+        "public, max-age=31536000, immutable"
+    } else {
+        "private, max-age=0, must-revalidate"
+    };
+    if if_none_match_matches(headers, &etag) {
+        return Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header(header::ETAG, &etag)
+            .header(header::CACHE_CONTROL, cache_control)
+            .header("x-content-type-options", "nosniff")
+            .body(Body::empty())
+            .map_err(|err| AppError::Internal(err.to_string()));
+    }
+
+    // Serve the cached variant; self-heal if the blob was reclaimed under us.
+    let stream = match state.blob.open_reader(&variant_key).await {
+        Ok(s) => s,
+        Err(AppError::NotFound) => {
+            render_and_cache(state, tenant_id, file, variant, &preset, &variant_key).await?;
+            state.blob.open_reader(&variant_key).await?
+        }
+        Err(err) => return Err(err),
+    };
+    state.metrics.record_download(size_bytes);
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_LENGTH, size_bytes.to_string())
+        .header(header::ETAG, etag)
+        .header(header::CACHE_CONTROL, cache_control)
+        .header("x-content-type-options", "nosniff")
+        .header(
+            header::CONTENT_DISPOSITION,
+            content_disposition(disposition, &variant_file_name(&file.original_name, variant, &preset)),
+        )
+        .body(Body::from_stream(stream))
+        .map_err(|err| AppError::Internal(err.to_string()))
+}
+
+/// Render a variant, write it as a content-addressed sibling blob, and upsert its row.
+/// Returns `(content_type, size_bytes, checksum)`.
+async fn render_and_cache(
+    state: &AppState,
+    tenant_id: Uuid,
+    file: &FileRecord,
+    variant: &str,
+    preset: &Preset,
+    variant_key: &str,
+) -> AppResult<(String, i64, String)> {
+    // Bound concurrent CPU-heavy renders.
+    let _permit = state
+        .render_sem
+        .acquire()
+        .await
+        .map_err(|_| AppError::Internal("render pool closed".into()))?;
+
+    let input = read_blob_to_vec(
+        state.blob.as_ref(),
+        &file.stored_key,
+        state.config.max_upload_bytes as usize,
+    )
+    .await?;
+
+    // Decode/resize/encode is CPU-bound — keep it off the async worker.
+    let preset_cloned = preset.clone();
+    let (bytes, content_type) =
+        tokio::task::spawn_blocking(move || transform::render(&input, &preset_cloned))
+            .await
+            .map_err(|e| AppError::Internal(format!("render task: {e}")))??;
+
+    let checksum = crypto::sha256_hex(&bytes);
+    let size = bytes.len() as i64;
+
+    let mut writer = state.blob.open_writer(variant_key).await?;
+    writer.write(Bytes::from(bytes)).await?;
+    writer.commit().await?;
+
+    sqlx::query(
+        "INSERT INTO file_variants \
+           (id, file_id, tenant_id, preset_key, stored_key, content_type, size_bytes, checksum_sha256) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+         ON CONFLICT (file_id, preset_key) DO UPDATE SET \
+           stored_key = EXCLUDED.stored_key, content_type = EXCLUDED.content_type, \
+           size_bytes = EXCLUDED.size_bytes, checksum_sha256 = EXCLUDED.checksum_sha256",
+    )
+    .bind(Uuid::now_v7())
+    .bind(file.id)
+    .bind(tenant_id)
+    .bind(variant)
+    .bind(variant_key)
+    .bind(content_type)
+    .bind(size)
+    .bind(&checksum)
+    .execute(&state.db)
+    .await?;
+
+    Ok((content_type.to_string(), size, checksum))
+}
+
+/// Read an entire blob into memory, capped at `max` bytes.
+async fn read_blob_to_vec(backend: &dyn BlobBackend, key: &str, max: usize) -> AppResult<Vec<u8>> {
+    let mut stream = backend.open_reader(key).await?;
+    let mut buf = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if buf.len() + chunk.len() > max {
+            return Err(AppError::BadRequest(
+                "source image too large to transform".into(),
+            ));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
+/// Suggested download filename for a variant, e.g. `photo_thumb.webp`.
+fn variant_file_name(original: &str, variant: &str, preset: &Preset) -> String {
+    let stem = original.rsplit_once('.').map(|(s, _)| s).unwrap_or(original);
+    let ext = match preset.fmt {
+        OutFormat::Jpeg => "jpg",
+        OutFormat::Png => "png",
+        OutFormat::Webp => "webp",
+    };
+    format!("{stem}_{variant}.{ext}")
 }
 
 /// Ask the tenant's callback whether this request may download a private file.
@@ -717,6 +907,9 @@ pub struct SignRequest {
     expires_in_seconds: Option<i64>,
     #[serde(default)]
     disposition: Option<String>,
+    /// Sign a URL for a named image variant instead of the original.
+    #[serde(default)]
+    variant: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -731,9 +924,20 @@ pub async fn sign(
     Path(file_ref): Path<String>,
     Json(req): Json<SignRequest>,
 ) -> AppResult<Json<SignResponse>> {
-    find_file(&state.db, ctx.tenant.id, &file_ref)
+    let file = find_file(&state.db, ctx.tenant.id, &file_ref)
         .await?
         .ok_or(AppError::NotFound)?;
+
+    let variant = req.variant.as_deref().filter(|v| !v.is_empty());
+    if let Some(v) = variant {
+        // Fail early if the preset isn't registered on the file's policy.
+        let policy = catalog::find_policy(&state.db, ctx.tenant.id, &file.policy_key)
+            .await?
+            .ok_or(AppError::NotFound)?;
+        if !policy.transforms.0.contains_key(v) {
+            return Err(AppError::BadRequest(format!("unknown variant '{v}'")));
+        }
+    }
 
     let ttl = req
         .expires_in_seconds
@@ -746,9 +950,14 @@ pub async fn sign(
         Some("attachment") => "attachment",
         _ => "inline",
     };
-    let sig = crypto::sign_download(ctx.tenant.signing_secret(), &tenant_id, &file_ref, exp, disposition);
+    let sig =
+        crypto::sign_download(ctx.tenant.signing_secret(), &tenant_id, &file_ref, exp, disposition, variant);
 
-    let mut url = format!("/v1/files/{file_ref}?t={tenant_id}&exp={exp}&disposition={disposition}&sig={sig}");
+    let mut url = format!("/v1/files/{file_ref}?t={tenant_id}&exp={exp}&disposition={disposition}");
+    if let Some(v) = variant {
+        url.push_str(&format!("&variant={v}"));
+    }
+    url.push_str(&format!("&sig={sig}"));
     if !state.config.public_base_url.is_empty() {
         url = format!("{}{}", state.config.public_base_url.trim_end_matches('/'), url);
     }

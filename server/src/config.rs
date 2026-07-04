@@ -68,6 +68,8 @@ pub struct Config {
     pub gc_interval_secs: u64,
     /// Only GC files soft-deleted at least this long ago (the trash retention window).
     pub gc_retention_secs: i64,
+    /// Max concurrent image-variant renders (CPU-bound). 0 => auto (CPU count).
+    pub image_render_concurrency: usize,
 }
 
 impl Config {
@@ -162,6 +164,7 @@ impl Config {
             db_acquire_timeout_secs: env_parse("DB_ACQUIRE_TIMEOUT_SECS", 30)?,
             gc_interval_secs: env_parse("GC_INTERVAL_SECONDS", 0)?,
             gc_retention_secs: env_parse("GC_RETENTION_SECONDS", 86400)?,
+            image_render_concurrency: env_parse("IMAGE_RENDER_CONCURRENCY", 0)?,
         })
     }
 }

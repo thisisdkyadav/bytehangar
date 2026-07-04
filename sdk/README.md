@@ -88,7 +88,35 @@ const { url } = await storage.signDownload(fileRef, { expiresInSeconds: 600 });
 // redirect the browser to `url`, or return it as an <img src>
 ```
 
-## 5. Soft delete and restore (server)
+## 5. Image transforms (variants)
+
+Register **named presets** on a policy; the server renders them lazily on first
+request (pure Rust) and caches the result. Presets bound the outputs, so only the
+variants you define can be produced.
+
+```ts
+await storage.registerCatalog([{
+  key: "avatar", category: "avatars", maxSizeBytes: 5_000_000,
+  allowContentTypes: ["image/png", "image/jpeg", "image/webp"],
+  transforms: {
+    thumb:  { w: 256, h: 256, fit: "cover", fmt: "webp", q: 80 },
+    banner: { w: 1200, fit: "inside", fmt: "jpeg", q: 82 },
+  },
+}]);
+
+// private file: fold the variant into the signed URL
+const { url } = await storage.signDownload(fileRef, { variant: "thumb" });
+
+// public file: add the variant to the direct URL
+const thumbUrl = client.fileUrl(tenantId, fileRef, { variant: "thumb" });
+```
+
+`fit` is `cover` (scale + center-crop) | `inside` (fit within, keep aspect) |
+`fill` (stretch); `fmt` is `jpeg` | `png` | `webp` (`q` applies to jpeg). At least
+one of `w`/`h` is required. The variant is part of the signature, so a `thumb` URL
+can't be re-pointed at `banner` or the original.
+
+## 6. Soft delete and restore (server)
 
 `deleteFile` is a soft delete: the row is tombstoned and the blob is held until
 garbage collection reclaims it. Until then you can undo:

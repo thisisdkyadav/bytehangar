@@ -9,6 +9,7 @@
 
 import crypto from "node:crypto";
 import http from "node:http";
+import zlib from "node:zlib";
 
 import { ByteHangarServer } from "../sdk/dist/server/index.js";
 import { ByteHangarClient } from "../sdk/dist/client/index.js";
@@ -33,6 +34,49 @@ function check(name, cond) {
 // so checksums differ when we want to defeat dedup.
 function pngBytes(salt = 0) {
   return Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, salt & 0xff]);
+}
+
+// A REAL, decodable RGB PNG (image-transform tests need actual pixels, not a stub).
+function crc32(buf) {
+  let c = 0xffffffff;
+  for (let i = 0; i < buf.length; i++) {
+    c = (c ^ buf[i]) >>> 0;
+    for (let k = 0; k < 8; k++) c = ((c >>> 1) ^ (0xedb88320 & -(c & 1))) >>> 0;
+  }
+  return (c ^ 0xffffffff) >>> 0;
+}
+function pngChunk(type, data) {
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(data.length >>> 0, 0);
+  const t = Buffer.from(type, "latin1");
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(Buffer.concat([t, data])), 0);
+  return Buffer.concat([len, t, data, crc]);
+}
+function realPng(w, h, salt = 0) {
+  const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(w, 0);
+  ihdr.writeUInt32BE(h, 4);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 2; // color type: truecolor RGB
+  const rows = [];
+  for (let y = 0; y < h; y++) {
+    const r = Buffer.alloc(1 + w * 3); // filter byte 0 + RGB row
+    for (let x = 0; x < w; x++) {
+      r[1 + x * 3] = (x + salt) & 0xff;
+      r[2 + x * 3] = (y * 2) & 0xff;
+      r[3 + x * 3] = 200;
+    }
+    rows.push(r);
+  }
+  const idat = zlib.deflateSync(Buffer.concat(rows));
+  return Buffer.concat([
+    sig,
+    pngChunk("IHDR", ihdr),
+    pngChunk("IDAT", idat),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
 }
 
 async function main() {
@@ -80,6 +124,24 @@ async function main() {
     { key: "img", category: "images", maxSizeBytes: 1024 * 1024, allowContentTypes: ["image/png"] },
     { key: "blob", category: "blobs", maxSizeBytes: 50 * 1024 * 1024, allowContentTypes: [] },
     { key: "pub", category: "public-assets", maxSizeBytes: 1024 * 1024, allowContentTypes: ["image/png"], visibility: "public" },
+    {
+      key: "photo",
+      category: "photos",
+      maxSizeBytes: 5 * 1024 * 1024,
+      allowContentTypes: ["image/png"],
+      transforms: {
+        thumb: { w: 64, h: 64, fit: "cover", fmt: "webp", q: 80 },
+        small: { w: 80, fmt: "jpeg", q: 70 },
+      },
+    },
+    {
+      key: "pubphoto",
+      category: "public-photos",
+      maxSizeBytes: 5 * 1024 * 1024,
+      allowContentTypes: ["image/png"],
+      visibility: "public",
+      transforms: { thumb: { w: 48, h: 48, fit: "cover", fmt: "png" } },
+    },
   ];
   const c1 = await storage.registerCatalog(policies);
   check("registerCatalog changed first time", c1.changed === true && c1.version >= 1);
@@ -206,6 +268,78 @@ async function main() {
     headers: { "if-none-match": etag ?? "" },
   });
   check("conditional GET returns 304 for a matching ETag", first.status === 200 && !!etag && second.status === 304);
+
+  // --- image transforms (variants) ---
+  const realImg = realPng(200, 100, 3);
+  const grantPhoto = await storage.createGrant("photo");
+  const upPhoto = await client.upload(grantPhoto.token, new Blob([realImg], { type: "image/png" }), {
+    fileName: "photo.png",
+  });
+
+  // private WebP variant via a signed URL
+  const signedThumb = await storage.signDownload(upPhoto.fileRef, { variant: "thumb" });
+  const thumbUrl = signedThumb.url.startsWith("http") ? signedThumb.url : PUBLIC + signedThumb.url;
+  const thumbRes = await fetch(thumbUrl);
+  const thumbBody = Buffer.from(await thumbRes.arrayBuffer());
+  check(
+    "variant: signed WebP thumb renders (200 + image/webp + RIFF/WEBP magic)",
+    thumbRes.status === 200 &&
+      thumbRes.headers.get("content-type") === "image/webp" &&
+      thumbBody.length > 12 &&
+      thumbBody.slice(0, 4).toString("latin1") === "RIFF" &&
+      thumbBody.slice(8, 12).toString("latin1") === "WEBP",
+  );
+  check("variant: response carries an ETag", !!thumbRes.headers.get("etag"));
+
+  // second request is a cache hit — identical bytes
+  const thumbRes2 = await fetch(thumbUrl);
+  const thumbBody2 = Buffer.from(await thumbRes2.arrayBuffer());
+  check("variant: cache hit returns identical bytes", Buffer.compare(thumbBody, thumbBody2) === 0);
+
+  // JPEG variant (width-only, aspect-preserving)
+  const signedSmall = await storage.signDownload(upPhoto.fileRef, { variant: "small" });
+  const smallUrl = signedSmall.url.startsWith("http") ? signedSmall.url : PUBLIC + signedSmall.url;
+  const smallRes = await fetch(smallUrl);
+  const smallBody = Buffer.from(await smallRes.arrayBuffer());
+  check(
+    "variant: JPEG variant renders (200 + image/jpeg + SOI magic)",
+    smallRes.status === 200 &&
+      smallRes.headers.get("content-type") === "image/jpeg" &&
+      smallBody[0] === 0xff &&
+      smallBody[1] === 0xd8,
+  );
+
+  // signature is variant-scoped: a thumb signature must not authorize another variant
+  const wrongVariant = await fetch(thumbUrl.replace("variant=thumb", "variant=small"));
+  check("variant: signature is variant-scoped (401 on mismatch)", wrongVariant.status === 401);
+
+  // unknown preset is rejected at sign time
+  let unknownRejected = false;
+  try {
+    await storage.signDownload(upPhoto.fileRef, { variant: "nope" });
+  } catch (err) {
+    unknownRejected = err.status === 400;
+  }
+  check("variant: unknown preset rejected at sign (400)", unknownRejected);
+
+  // public variant via fileUrl (no signature)
+  const grantPubPhoto = await storage.createGrant("pubphoto");
+  const upPubPhoto = await client.upload(grantPubPhoto.token, new Blob([realImg], { type: "image/png" }), {
+    fileName: "pubphoto.png",
+  });
+  const pubThumbRes = await fetch(client.fileUrl(tenant.id, upPubPhoto.fileRef, { variant: "thumb" }));
+  const pubThumbBody = Buffer.from(await pubThumbRes.arrayBuffer());
+  check(
+    "variant: public PNG thumb via fileUrl (200 + image/png magic)",
+    pubThumbRes.status === 200 &&
+      pubThumbRes.headers.get("content-type") === "image/png" &&
+      pubThumbBody[0] === 0x89 &&
+      pubThumbBody[1] === 0x50,
+  );
+
+  // unknown variant on a public file -> 404
+  const pubUnknown = await fetch(client.fileUrl(tenant.id, upPubPhoto.fileRef, { variant: "nope" }));
+  check("variant: unknown public variant is 404", pubUnknown.status === 404);
 
   // --- visibility: public files served without a signature ---
   const pngPub = pngBytes(7);

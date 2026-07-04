@@ -132,6 +132,36 @@ Full SDK docs (incl. the React `<UploadButton>`): [sdk/README.md](./sdk/README.m
 | `SIGNED_URL_TTL_SECONDS` / `PUBLIC_BASE_URL` | `300` / _(empty)_ | Signed download URLs |
 | `GC_INTERVAL_SECONDS` | `0` | Built-in GC scheduler interval; `0` disables (run GC via the endpoint/cron instead) |
 | `GC_RETENTION_SECONDS` | `86400` | Trash window — only GC files soft-deleted at least this long ago |
+| `IMAGE_RENDER_CONCURRENCY` | `0` | Max concurrent image-variant renders (CPU-bound); `0` = auto (CPU count) |
+
+---
+
+## Image transforms
+
+Register **named transform presets** per policy; reference one by name on download and
+the server renders it lazily (pure-Rust — no libvips) then caches it as a content-addressed
+sibling blob reclaimed by GC with the original. Presets are the render-DoS guard: only the
+named, bounded outputs you define can ever be produced.
+
+```ts
+await storage.registerCatalog([{
+  key: "avatar", category: "avatars", maxSizeBytes: 5_000_000,
+  allowContentTypes: ["image/png", "image/jpeg", "image/webp"],
+  transforms: {
+    thumb:  { w: 256, h: 256, fit: "cover", fmt: "webp", q: 80 },
+    banner: { w: 1200, fit: "inside", fmt: "jpeg", q: 82 },
+  },
+}]);
+
+// private: fold the variant into the signed URL
+const { url } = await storage.signDownload(fileRef, { variant: "thumb" });
+// public: just add it to the file URL
+client.fileUrl(tenantId, fileRef, { variant: "thumb" });
+```
+
+- **fit**: `cover` (scale + center-crop), `inside` (fit within, keep aspect), `fill` (stretch).
+- **fmt**: `jpeg`, `png`, `webp` (`q` applies to jpeg). Give at least one of `w`/`h`.
+- The variant is part of the signed surface, so a signature for `thumb` can't fetch `banner` or the original.
 
 ---
 

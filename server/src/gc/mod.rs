@@ -122,6 +122,20 @@ async fn run_gc_inner(
         if live == 0 {
             blob.delete(&key).await?;
             blobs_deleted += 1;
+            // Reclaim rendered image variants derived from this original. Safe for the
+            // same reason as the original: no live file references this stored_key, so
+            // no live variant can either. Rows cascade-delete with the parent purge.
+            let variant_keys: Vec<String> = sqlx::query_scalar(
+                "SELECT DISTINCT fv.stored_key FROM file_variants fv \
+                 JOIN files f ON f.id = fv.file_id WHERE f.stored_key = $1",
+            )
+            .bind(&key)
+            .fetch_all(&mut **tx)
+            .await?;
+            for vk in &variant_keys {
+                blob.delete(vk).await?;
+            }
+            blobs_deleted += variant_keys.len() as u64;
         }
         // Purge only tombstones past the retention cutoff — never sibling tombstones
         // (same stored_key, dedup) that are still inside their restore window.

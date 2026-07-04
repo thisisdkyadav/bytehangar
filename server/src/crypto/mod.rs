@@ -110,26 +110,46 @@ pub fn decode_grant(secret: &str, token: &str) -> AppResult<GrantClaims> {
 // Signed download URLs:  sign "<tenant>.<file_ref>.<exp>" with the tenant secret
 // ---------------------------------------------------------------------------
 
+/// The signed download message. The `variant` (image preset) is only appended when
+/// present, so non-variant URLs are byte-identical to earlier versions.
+fn download_message(
+    tenant_id: &str,
+    file_ref: &str,
+    exp: i64,
+    disposition: &str,
+    variant: Option<&str>,
+) -> String {
+    match variant {
+        Some(v) if !v.is_empty() => {
+            format!("{tenant_id}.{file_ref}.{exp}.{disposition}.v={v}")
+        }
+        _ => format!("{tenant_id}.{file_ref}.{exp}.{disposition}"),
+    }
+}
+
 pub fn sign_download(
     secret: &str,
     tenant_id: &str,
     file_ref: &str,
     exp: i64,
     disposition: &str,
+    variant: Option<&str>,
 ) -> String {
-    let message = format!("{tenant_id}.{file_ref}.{exp}.{disposition}");
+    let message = download_message(tenant_id, file_ref, exp, disposition, variant);
     hmac_sign(secret.as_bytes(), message.as_bytes())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn verify_download(
     secret: &str,
     tenant_id: &str,
     file_ref: &str,
     exp: i64,
     disposition: &str,
+    variant: Option<&str>,
     signature: &str,
 ) -> bool {
-    let message = format!("{tenant_id}.{file_ref}.{exp}.{disposition}");
+    let message = download_message(tenant_id, file_ref, exp, disposition, variant);
     hmac_verify(secret.as_bytes(), message.as_bytes(), signature)
 }
 
@@ -183,11 +203,21 @@ mod tests {
 
     #[test]
     fn download_sign_then_verify() {
-        let sig = sign_download("secret", "tenant", "fileref", 123, "inline");
-        assert!(verify_download("secret", "tenant", "fileref", 123, "inline", &sig));
-        assert!(!verify_download("secret", "tenant", "fileref", 124, "inline", &sig)); // exp
-        assert!(!verify_download("other", "tenant", "fileref", 123, "inline", &sig)); // secret
-        assert!(!verify_download("secret", "tenant", "fileref", 123, "attachment", &sig)); // disposition
+        let sig = sign_download("secret", "tenant", "fileref", 123, "inline", None);
+        assert!(verify_download("secret", "tenant", "fileref", 123, "inline", None, &sig));
+        assert!(!verify_download("secret", "tenant", "fileref", 124, "inline", None, &sig)); // exp
+        assert!(!verify_download("other", "tenant", "fileref", 123, "inline", None, &sig)); // secret
+        assert!(!verify_download("secret", "tenant", "fileref", 123, "attachment", None, &sig)); // disposition
+        // a signature without a variant must not authorize a variant request
+        assert!(!verify_download("secret", "tenant", "fileref", 123, "inline", Some("thumb"), &sig));
+    }
+
+    #[test]
+    fn download_variant_is_signed() {
+        let sig = sign_download("secret", "tenant", "fileref", 123, "inline", Some("thumb"));
+        assert!(verify_download("secret", "tenant", "fileref", 123, "inline", Some("thumb"), &sig));
+        assert!(!verify_download("secret", "tenant", "fileref", 123, "inline", Some("banner"), &sig)); // variant
+        assert!(!verify_download("secret", "tenant", "fileref", 123, "inline", None, &sig)); // missing variant
     }
 
     #[test]

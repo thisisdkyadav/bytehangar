@@ -1,6 +1,6 @@
 [package]
 name = "bytehangar"
-version = "1.1.1"
+version = "1.2.0"
 edition = "2021"
 description = "Open-source self-hostable file storage — core server"
 license = "MIT"
@@ -26,6 +26,9 @@ aes-gcm = "0.10"
 hex = "0.4"
 base64 = "0.22"
 infer = "0.16"
+# Pure-Rust image transforms (decode/resize/encode). Feature-gated to just the
+# formats we accept, to keep the decoder attack surface small.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

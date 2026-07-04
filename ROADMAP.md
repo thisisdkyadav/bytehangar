@@ -77,9 +77,10 @@ media features and a few real security/ops gaps.**
 
 ## v1.2 — Media & lifecycle (the headline differentiators)
 
-- **On-the-fly image transforms / thumbnails** [L] — `?w=&h=&fit=&fmt=&q=`, lazily rendered +
-  content-addressed cached as sibling blobs, transform presets whitelisted per policy (render-DoS
-  guard). This is *the* reason teams pick Cloudinary; the blob/dedup/signed-URL plumbing already fits.
+- ✅ **On-the-fly image transforms / thumbnails** [L] — **shipped in v1.2.0.** Named presets per
+  policy (`transforms`), referenced by `variant` on the signed/public download URL; pure-Rust
+  (`image` crate, no libvips) lazy render → content-addressed sibling-blob cache reclaimed by GC;
+  render-DoS-guarded by bounded presets + a concurrency semaphore. Formats jpeg/png/webp; AVIF TBD.
 - **File-level TTL / expiry + sweep** [M] — `files.expires_at` (+ per-policy default), purged by the
   GC sweep; emit `file.expired`. Pairs with restore.
 - **Bulk operations** [M] — batch delete / sign / metadata (SDK loops one-by-one today).

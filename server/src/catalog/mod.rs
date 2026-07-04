@@ -2,9 +2,12 @@
 //! `PUT /internal/v1/catalog` — idempotent (no-op if unchanged) and versioned.
 //! Policies are the resolved, enforceable upload rules (category + size + types).
 
+use std::collections::HashMap;
+
 use axum::extract::State;
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use sqlx::types::Json as SqlJson;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -12,6 +15,7 @@ use crate::auth::TenantContext;
 use crate::crypto;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
+use crate::transform::Preset;
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct PolicyRow {
@@ -20,11 +24,13 @@ pub struct PolicyRow {
     pub max_size_bytes: i64,
     pub allow_content_types: Vec<String>,
     pub visibility: String,
+    /// Named image transform presets registered for this policy.
+    pub transforms: SqlJson<HashMap<String, Preset>>,
 }
 
 pub async fn find_policy(db: &PgPool, tenant_id: Uuid, key: &str) -> AppResult<Option<PolicyRow>> {
     let row = sqlx::query_as::<_, PolicyRow>(
-        "SELECT key, category, max_size_bytes, allow_content_types, visibility \
+        "SELECT key, category, max_size_bytes, allow_content_types, visibility, transforms \
          FROM policies WHERE tenant_id = $1 AND key = $2",
     )
     .bind(tenant_id)
@@ -44,6 +50,18 @@ pub struct PolicyInput {
     /// "public" | "private" (default "private").
     #[serde(default)]
     pub visibility: Option<String>,
+    /// Named image transform presets: `{ "thumb": { w, h, fit, fmt, q }, ... }`.
+    #[serde(default)]
+    pub transforms: HashMap<String, Preset>,
+}
+
+/// Variant/preset key — appears in signed URLs, so keep it path/URL-safe.
+pub fn is_valid_variant_key(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 #[derive(Deserialize)]
@@ -103,6 +121,15 @@ pub async fn register_catalog(
                 )));
             }
         }
+        for (name, preset) in &policy.transforms {
+            if !is_valid_variant_key(name) {
+                return Err(AppError::BadRequest(format!(
+                    "invalid transform name '{name}' in policy '{}'; must match ^[A-Za-z0-9_-]+$",
+                    policy.key
+                )));
+            }
+            preset.validate(name)?;
+        }
     }
 
     policies.sort_by(|a, b| a.key.cmp(&b.key));
@@ -143,8 +170,8 @@ pub async fn register_catalog(
         .await?;
     for policy in &policies {
         sqlx::query(
-            "INSERT INTO policies (tenant_id, key, category, max_size_bytes, allow_content_types, visibility) \
-             VALUES ($1, $2, $3, $4, $5, $6)",
+            "INSERT INTO policies (tenant_id, key, category, max_size_bytes, allow_content_types, visibility, transforms) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
         .bind(tenant_id)
         .bind(&policy.key)
@@ -152,6 +179,7 @@ pub async fn register_catalog(
         .bind(policy.max_size_bytes)
         .bind(&policy.allow_content_types)
         .bind(policy.visibility.as_deref().unwrap_or("private"))
+        .bind(SqlJson(&policy.transforms))
         .execute(&mut *tx)
         .await?;
     }
@@ -175,13 +203,20 @@ fn catalog_hash(policies: &[PolicyInput]) -> String {
     for policy in policies {
         let mut content_types = policy.allow_content_types.clone();
         content_types.sort();
+        let mut transforms: Vec<String> = policy
+            .transforms
+            .iter()
+            .map(|(k, v)| format!("{k}={}", v.cache_signature()))
+            .collect();
+        transforms.sort();
         parts.push_str(&format!(
-            "{}|{}|{}|{}|{}\n",
+            "{}|{}|{}|{}|{}|{}\n",
             policy.key,
             policy.category,
             policy.max_size_bytes,
             content_types.join(","),
-            policy.visibility.as_deref().unwrap_or("private")
+            policy.visibility.as_deref().unwrap_or("private"),
+            transforms.join(",")
         ));
     }
     crypto::sha256_hex(parts.as_bytes())

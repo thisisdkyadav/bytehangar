@@ -19,6 +19,7 @@ mod rate_limit;
 mod secrets;
 mod ssrf;
 mod state;
+mod transform;
 mod tenants;
 mod usage;
 mod webhooks;
@@ -77,6 +78,13 @@ async fn main() -> anyhow::Result<()> {
     let public_addr = format!("{}:{}", config.bind, config.port);
     let internal_addr = format!("{}:{}", config.internal_bind, config.internal_port);
 
+    let render_permits = if config.image_render_concurrency > 0 {
+        config.image_render_concurrency
+    } else {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+    };
     let state = AppState {
         config: Arc::new(config),
         db,
@@ -85,6 +93,7 @@ async fn main() -> anyhow::Result<()> {
         http_client,
         metrics: Arc::new(metrics::Metrics::default()),
         rate_limiter,
+        render_sem: Arc::new(tokio::sync::Semaphore::new(render_permits)),
     };
 
     // One shutdown signal flips a watch that the serves and background workers observe.
