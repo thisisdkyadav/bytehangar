@@ -83,7 +83,15 @@ impl BlobBackend for LocalDisk {
         if let Some(parent) = final_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        let temp = final_path.with_extension("part");
+        // Unique temp path per writer: concurrent writers of the SAME key (e.g. two
+        // requests racing to render the same content-addressed image variant) must not
+        // share a temp file, or they'd corrupt each other's bytes before the atomic
+        // rename. Each writes its own temp; the last rename wins (bytes are identical).
+        let temp = {
+            let mut t = final_path.clone().into_os_string();
+            t.push(format!(".{}.part", uuid::Uuid::now_v7()));
+            std::path::PathBuf::from(t)
+        };
         let file = tokio::fs::File::create(&temp).await?;
         Ok(Box::new(LocalWriter {
             file: Some(file),

@@ -341,6 +341,23 @@ async function main() {
   const pubUnknown = await fetch(client.fileUrl(tenant.id, upPubPhoto.fileRef, { variant: "nope" }));
   check("variant: unknown public variant is 404", pubUnknown.status === 404);
 
+  // extreme-aspect source must render bounded (crop-then-scale), not OOM/crash the server
+  const tallImg = realPng(4, 3000, 5); // aspect 1:750, well under input pixel/dim limits
+  const grantTall = await storage.createGrant("photo");
+  const upTall = await client.upload(grantTall.token, new Blob([tallImg], { type: "image/png" }), {
+    fileName: "tall.png",
+  });
+  const tallThumb = await storage.signDownload(upTall.fileRef, { variant: "thumb" });
+  const tallUrl = tallThumb.url.startsWith("http") ? tallThumb.url : PUBLIC + tallThumb.url;
+  const tallRes = await fetch(tallUrl);
+  check(
+    "variant: extreme-aspect source renders bounded (200, no crash)",
+    tallRes.status === 200 && tallRes.headers.get("content-type") === "image/webp",
+  );
+  // server still healthy after the extreme render
+  const health = await fetch(`${PUBLIC}/health`);
+  check("variant: server healthy after extreme-aspect render", health.status === 200);
+
   // --- visibility: public files served without a signature ---
   const pngPub = pngBytes(7);
   const grantPub = await storage.createGrant("pub");

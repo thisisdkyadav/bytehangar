@@ -122,23 +122,24 @@ async fn run_gc_inner(
         if live == 0 {
             blob.delete(&key).await?;
             blobs_deleted += 1;
-            // Reclaim rendered image variants derived from this original. Safe for the
-            // same reason as the original: no live file references this stored_key, so
-            // no live variant can either. Rows cascade-delete with the parent purge.
-            let variant_keys: Vec<String> = sqlx::query_scalar(
-                "SELECT DISTINCT fv.stored_key FROM file_variants fv \
-                 JOIN files f ON f.id = fv.file_id WHERE f.stored_key = $1",
-            )
-            .bind(&key)
-            .fetch_all(&mut **tx)
-            .await?;
-            for vk in &variant_keys {
-                blob.delete(vk).await?;
-            }
-            blobs_deleted += variant_keys.len() as u64;
         }
+        // Variant blobs of the tombstones we're about to purge. Collected BEFORE the
+        // purge (the join needs the file rows); reclaimed AFTER, but only if no other
+        // file_variants row still references them. That reference check is what makes it
+        // dedup-safe and also handles a deduped sibling whose parent purged first.
+        let variant_candidates: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT fv.stored_key FROM file_variants fv \
+             JOIN files f ON f.id = fv.file_id \
+             WHERE f.stored_key = $1 AND f.deleted_at IS NOT NULL AND f.deleted_at < $2",
+        )
+        .bind(&key)
+        .bind(cutoff)
+        .fetch_all(&mut **tx)
+        .await?;
+
         // Purge only tombstones past the retention cutoff — never sibling tombstones
-        // (same stored_key, dedup) that are still inside their restore window.
+        // (same stored_key, dedup) that are still inside their restore window. This
+        // cascade-deletes the purged files' file_variants rows.
         let purged = sqlx::query(
             "DELETE FROM files WHERE stored_key = $1 AND deleted_at IS NOT NULL AND deleted_at < $2",
         )
@@ -148,6 +149,19 @@ async fn run_gc_inner(
         .await?
         .rows_affected();
         rows_purged += purged;
+
+        // Reclaim variant blobs that no file_variants row references anymore.
+        for vk in variant_candidates {
+            let refs: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM file_variants WHERE stored_key = $1")
+                    .bind(&vk)
+                    .fetch_one(&mut **tx)
+                    .await?;
+            if refs == 0 {
+                blob.delete(&vk).await?;
+                blobs_deleted += 1;
+            }
+        }
     }
 
     Ok(GcReport {

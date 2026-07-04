@@ -630,8 +630,10 @@ async fn serve_variant(
     };
 
     let etag = format!("\"{checksum}\"");
+    // NOT immutable: a redefined preset changes the bytes under the same URL. A short
+    // max-age + the ETag lets caches revalidate cheaply (304) and pick up re-renders.
     let cache_control = if file.visibility == "public" {
-        "public, max-age=31536000, immutable"
+        "public, max-age=3600"
     } else {
         "private, max-age=0, must-revalidate"
     };
@@ -655,6 +657,12 @@ async fn serve_variant(
         Err(err) => return Err(err),
     };
     state.metrics.record_download(size_bytes);
+    // best-effort egress metering (mirrors the original-file download path)
+    let _ = sqlx::query("INSERT INTO usage_events (tenant_id, op, bytes) VALUES ($1, 'egress', $2)")
+        .bind(tenant_id)
+        .bind(size_bytes)
+        .execute(&state.db)
+        .await;
 
     Response::builder()
         .status(StatusCode::OK)
@@ -705,6 +713,15 @@ async fn render_and_cache(
     let checksum = crypto::sha256_hex(&bytes);
     let size = bytes.len() as i64;
 
+    // Capture the prior variant blob (if any) so a preset redefinition doesn't leak it.
+    let prior_key: Option<String> = sqlx::query_scalar(
+        "SELECT stored_key FROM file_variants WHERE file_id = $1 AND preset_key = $2",
+    )
+    .bind(file.id)
+    .bind(variant)
+    .fetch_optional(&state.db)
+    .await?;
+
     let mut writer = state.blob.open_writer(variant_key).await?;
     writer.write(Bytes::from(bytes)).await?;
     writer.commit().await?;
@@ -727,6 +744,21 @@ async fn render_and_cache(
     .bind(&checksum)
     .execute(&state.db)
     .await?;
+
+    // Preset redefined -> reclaim the superseded variant blob if nothing else uses it.
+    if let Some(old) = prior_key {
+        if old != variant_key {
+            let refs: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM file_variants WHERE stored_key = $1")
+                    .bind(&old)
+                    .fetch_one(&state.db)
+                    .await
+                    .unwrap_or(1);
+            if refs == 0 {
+                let _ = state.blob.delete(&old).await;
+            }
+        }
+    }
 
     Ok((content_type.to_string(), size, checksum))
 }

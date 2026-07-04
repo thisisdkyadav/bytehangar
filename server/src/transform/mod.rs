@@ -14,8 +14,9 @@ use crate::error::{AppError, AppResult};
 const MAX_INPUT_PIXELS: u64 = 40_000_000;
 /// Max width/height for a decoded input (hard cap during decode).
 const MAX_INPUT_DIM: u32 = 20_000;
-/// Max output dimension a preset may request.
-pub const MAX_OUTPUT_DIM: u32 = 8_192;
+/// Max output dimension a preset may request (also caps the aspect-derived free
+/// axis of single-dimension presets, so no render can allocate unbounded).
+pub const MAX_OUTPUT_DIM: u32 = 4_096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -156,18 +157,40 @@ pub fn render(input: &[u8], preset: &Preset) -> AppResult<(Vec<u8>, &'static str
 fn apply_fit(img: &DynamicImage, preset: &Preset, iw: u32, ih: u32) -> DynamicImage {
     let f = FilterType::Lanczos3;
     match (preset.w, preset.h, preset.fit) {
-        (Some(w), Some(h), Fit::Cover) => img.resize_to_fill(w, h, f),
+        (Some(w), Some(h), Fit::Cover) => cover(img, iw, ih, w, h, f),
         (Some(w), Some(h), Fit::Fill) => img.resize_exact(w, h, f),
         (Some(w), Some(h), Fit::Inside) => img.resize(w, h, f),
-        // Single dimension: preserve aspect, bound by the given side.
-        (Some(w), None, _) => img.resize(w, u32::MAX, f),
-        (None, Some(h), _) => img.resize(u32::MAX, h, f),
+        // Single dimension: preserve aspect, but bound the FREE axis by MAX_OUTPUT_DIM
+        // (never u32::MAX) so an extreme-aspect input can't force an unbounded upscale.
+        (Some(w), None, _) => img.resize(w, MAX_OUTPUT_DIM, f),
+        (None, Some(h), _) => img.resize(MAX_OUTPUT_DIM, h, f),
         // Validated out (at least one of w/h is required).
         (None, None, _) => {
             let _ = (iw, ih);
             img.clone()
         }
     }
+}
+
+/// Cover: center-crop the input to the target aspect ratio, then scale to the exact
+/// size. Crop-then-scale keeps every allocation bounded by the input + output — unlike
+/// `resize_to_fill`, whose pre-crop intermediate explodes for extreme-aspect inputs.
+fn cover(img: &DynamicImage, iw: u32, ih: u32, nw: u32, nh: u32, f: FilterType) -> DynamicImage {
+    if iw == 0 || ih == 0 {
+        return img.resize_exact(nw, nh, f);
+    }
+    // Compare aspect ratios by cross-multiplication (no floats), then crop the axis
+    // that overshoots the target aspect so the crop matches nw:nh.
+    let (crop_w, crop_h) = if (iw as u64) * (nh as u64) >= (ih as u64) * (nw as u64) {
+        // input wider than target -> crop width
+        (((ih as u64 * nw as u64) / nh as u64).clamp(1, iw as u64) as u32, ih)
+    } else {
+        // input taller than target -> crop height
+        (iw, ((iw as u64 * nh as u64) / nw as u64).clamp(1, ih as u64) as u32)
+    };
+    let x = (iw - crop_w) / 2;
+    let y = (ih - crop_h) / 2;
+    img.crop_imm(x, y, crop_w, crop_h).resize_exact(nw, nh, f)
 }
 
 #[cfg(test)]
@@ -220,6 +243,27 @@ mod tests {
         let (bytes, ct) = render(&src, &preset).unwrap();
         assert_eq!(ct, "image/webp");
         assert_eq!(out_dims(&bytes), (32, 32));
+    }
+
+    #[test]
+    fn extreme_aspect_cover_is_exact_not_exploded() {
+        // A 4×4000 (very tall) source into a 64×64 cover must produce EXACTLY 64×64
+        // via crop-then-scale — never a giant pre-crop intermediate.
+        let src = source_png(4, 4000);
+        let preset = Preset { w: Some(64), h: Some(64), fit: Fit::Cover, fmt: OutFormat::Png, q: None };
+        let (bytes, _) = render(&src, &preset).unwrap();
+        assert_eq!(out_dims(&bytes), (64, 64));
+    }
+
+    #[test]
+    fn extreme_aspect_single_axis_is_bounded() {
+        // Width-only preset on a 2×4000 (aspect 1:2000) image: the aspect-derived
+        // height must be clamped to MAX_OUTPUT_DIM, not u32::MAX.
+        let src = source_png(2, 4000);
+        let preset = Preset { w: Some(100), h: None, fit: Fit::Cover, fmt: OutFormat::Png, q: None };
+        let (bytes, _) = render(&src, &preset).unwrap();
+        let (w, h) = out_dims(&bytes);
+        assert!(w <= MAX_OUTPUT_DIM && h <= MAX_OUTPUT_DIM, "got {w}x{h}");
     }
 
     #[test]

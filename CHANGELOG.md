@@ -25,6 +25,17 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   - SDK: `PolicyDefinition.transforms`, `signDownload({ variant })`,
     `fileUrl(t, ref, { variant })`.
 
+### Hardened (pre-release adversarial review)
+- **Critical DoS fixed**: single-axis presets no longer pass `u32::MAX` as the free
+  axis, and `cover` is now crop-then-scale — an extreme-aspect image can no longer
+  force an unbounded upscale allocation that aborts the process. `MAX_OUTPUT_DIM`
+  lowered to 4096.
+- Concurrent renders of the same content-addressed variant no longer race on the local
+  backend (unique per-writer temp path → atomic rename).
+- Variant responses are no longer `immutable` (a redefined preset changes the bytes);
+  a redefined preset now reclaims its superseded variant blob, and GC reclaims variant
+  blobs once no `file_variants` row references them (dedup-safe). Variant egress is metered.
+
 ## [1.1.1] — Adoption polish + Docker fix
 
 ### Fixed
