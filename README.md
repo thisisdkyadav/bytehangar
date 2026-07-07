@@ -129,6 +129,7 @@ Full SDK docs (incl. the React `<UploadButton>`): [sdk/README.md](./sdk/README.m
 | `BLOB_ALLOWED_CONTENT_TYPES` | _(empty)_ | Master content-type allowlist (CSV). Empty = `image/png,jpeg,webp,gif` + `application/pdf`; `*` = allow all except the inviolable executable/active-content denylist |
 | `ADMIN_TOKEN` | _(empty)_ | Bootstrap admin token; empty = provisioning disabled |
 | `MASTER_KEY` | _(empty)_ | Encrypts tenant secrets at rest (AES-256-GCM). **Required in production** |
+| `MASTER_KEY_PREVIOUS` | _(empty)_ | Old key accepted for decrypt during a [key rotation](./docs/OPERATIONS.md#master-key-rotation) |
 | `SIGNED_URL_TTL_SECONDS` / `PUBLIC_BASE_URL` | `300` / _(empty)_ | Signed download URLs |
 | `GC_INTERVAL_SECONDS` | `0` | Built-in GC scheduler interval; `0` disables (run GC via the endpoint/cron instead) |
 | `GC_RETENTION_SECONDS` | `86400` | Trash window — only GC files soft-deleted at least this long ago |
@@ -186,7 +187,10 @@ client.fileUrl(tenantId, fileRef, { variant: "thumb" });
 - `GET /health` — liveness; `GET /ready` — readiness (checks Postgres).
 - `GET /metrics` (internal plane) — Prometheus counters (uploads, downloads, bytes, deletes).
 - `POST /internal/v1/gc` (admin) — reclaim blobs for soft-deleted files (dedup-safe). Run on a schedule (cron), **or** set `GC_INTERVAL_SECONDS>0` to use the **built-in GC scheduler** (single-flight via an advisory xact lock) and skip the cron entirely. `GC_RETENTION_SECONDS` sets the trash window.
-- **Audit log**: admin/provisioning actions (tenant / key / quota / webhook / download-auth) are written to the `audit_log` table for traceability.
+- `POST /internal/v1/reconcile` (admin) — reclaim **orphan blobs**: bytes with no `files`/`file_variants` row (e.g. an upload that wrote the blob then crashed before its DB row). Conservative (only deletes blobs older than `grace_seconds`, default 3600); supports `dry_run`. Run occasionally and after a restore.
+- `POST /internal/v1/admin/rotate-secrets` (admin) — re-encrypt all tenant secrets under the current `MASTER_KEY` (see [key rotation](./docs/OPERATIONS.md#master-key-rotation)).
+- **Audit log**: admin/provisioning actions (tenant / key / quota / webhook / download-auth / secret-rotation) are written to the `audit_log` table for traceability.
+- **Backup, disaster recovery, and routine maintenance**: see the [operations runbook](./docs/OPERATIONS.md) — Postgres is the source of truth; the blob store must never be restored *behind* it.
 - **Graceful shutdown** on SIGINT/SIGTERM drains in-flight requests (and the webhook worker).
 - Server **auto-migrates** on boot.
 

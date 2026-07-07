@@ -17,22 +17,49 @@ const PREFIX: &str = "enc:v1:";
 
 pub struct Secrets {
     cipher: Option<Aes256Gcm>,
+    /// Optional previous key, tried on DECRYPT only — enables zero-downtime rotation.
+    previous: Option<Aes256Gcm>,
+}
+
+fn build_cipher(master_key: &str) -> Option<Aes256Gcm> {
+    if master_key.is_empty() {
+        return None;
+    }
+    let key = Sha256::digest(master_key.as_bytes());
+    Some(Aes256Gcm::new_from_slice(&key).expect("sha256 yields a 32-byte key"))
 }
 
 impl Secrets {
     pub fn new(master_key: &str) -> Self {
-        if master_key.is_empty() {
-            return Self { cipher: None };
-        }
-        let key = Sha256::digest(master_key.as_bytes());
-        let cipher = Aes256Gcm::new_from_slice(&key).expect("sha256 yields a 32-byte key");
+        Self::with_previous(master_key, "")
+    }
+
+    /// `previous_key` (if set) is accepted on decrypt after the current key, so both the
+    /// old and new master key work mid-rotation. New writes always use the current key.
+    pub fn with_previous(master_key: &str, previous_key: &str) -> Self {
         Self {
-            cipher: Some(cipher),
+            cipher: build_cipher(master_key),
+            previous: build_cipher(previous_key),
         }
     }
 
     pub fn enabled(&self) -> bool {
         self.cipher.is_some()
+    }
+
+    /// Re-encrypt a stored value under the CURRENT key (used by key rotation). Decrypts
+    /// with the current-or-previous key first; a value that decrypts with neither is
+    /// returned unchanged (never destroy an unreadable secret). Legacy plaintext is
+    /// migrated to ciphertext.
+    pub fn reencrypt(&self, stored: &str) -> String {
+        if stored.starts_with(PREFIX) {
+            let plain = self.decrypt(stored);
+            if plain.is_empty() {
+                return stored.to_string();
+            }
+            return self.encrypt(&plain);
+        }
+        self.encrypt(stored)
     }
 
     /// Encrypt a secret for storage. Returns plaintext unchanged when no master key.
@@ -52,15 +79,16 @@ impl Secrets {
         }
     }
 
-    /// Decrypt a stored value. Legacy (unprefixed) values are returned as-is.
+    /// Decrypt a stored value. Legacy (unprefixed) values are returned as-is. Tries the
+    /// current key then the previous key (rotation).
     pub fn decrypt(&self, stored: &str) -> String {
         let Some(encoded) = stored.strip_prefix(PREFIX) else {
             return stored.to_string();
         };
-        let Some(cipher) = &self.cipher else {
+        if self.cipher.is_none() && self.previous.is_none() {
             tracing::warn!("encrypted secret present but no MASTER_KEY configured");
             return String::new();
-        };
+        }
         let buf = match STANDARD.decode(encoded) {
             Ok(buf) if buf.len() > 12 => buf,
             _ => {
@@ -69,13 +97,16 @@ impl Secrets {
             }
         };
         let (nonce, ciphertext) = buf.split_at(12);
-        match cipher.decrypt(Nonce::from_slice(nonce), ciphertext) {
-            Ok(plaintext) => String::from_utf8(plaintext).unwrap_or_default(),
-            Err(_) => {
-                tracing::warn!("failed to decrypt secret (wrong MASTER_KEY?)");
-                String::new()
+        for cipher in [self.cipher.as_ref(), self.previous.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            if let Ok(plaintext) = cipher.decrypt(Nonce::from_slice(nonce), ciphertext) {
+                return String::from_utf8(plaintext).unwrap_or_default();
             }
         }
+        tracing::warn!("failed to decrypt secret (wrong MASTER_KEY?)");
+        String::new()
     }
 }
 
@@ -116,5 +147,34 @@ mod tests {
     fn nonce_is_randomized() {
         let secrets = Secrets::new("master");
         assert_ne!(secrets.encrypt("x"), secrets.encrypt("x"));
+    }
+
+    #[test]
+    fn previous_key_decrypts_during_rotation() {
+        let old = Secrets::new("old-key");
+        let ciphertext = old.encrypt("secret");
+        // Mid-rotation: current = new, previous = old.
+        let rotating = Secrets::with_previous("new-key", "old-key");
+        assert_eq!(rotating.decrypt(&ciphertext), "secret"); // old value still readable
+        let reencrypted = rotating.reencrypt(&ciphertext);
+        // After re-encrypt, only the new key can read it.
+        assert_eq!(Secrets::new("new-key").decrypt(&reencrypted), "secret");
+        assert_eq!(old.decrypt(&reencrypted), "");
+    }
+
+    #[test]
+    fn reencrypt_migrates_legacy_plaintext() {
+        let secrets = Secrets::new("k");
+        let reencrypted = secrets.reencrypt("legacy");
+        assert!(reencrypted.starts_with(PREFIX));
+        assert_eq!(secrets.decrypt(&reencrypted), "legacy");
+    }
+
+    #[test]
+    fn reencrypt_preserves_undecryptable_value() {
+        // A value encrypted with a key we don't have must not be destroyed.
+        let orphan = Secrets::new("some-other-key").encrypt("x");
+        let secrets = Secrets::new("our-key");
+        assert_eq!(secrets.reencrypt(&orphan), orphan);
     }
 }

@@ -3,6 +3,28 @@
 All notable changes to ByteHangar (server + `@bytehangar/sdk`) are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] — Production hardening
+
+### Added
+- **Orphan-blob reconcile** (`POST /internal/v1/reconcile`, admin) — reclaims physical
+  blobs that no `files`/`file_variants` row references (e.g. an upload that wrote the
+  blob then crashed before committing its DB row — invisible to the dedup-safe GC).
+  Lists the store, deletes only blobs older than `grace_seconds` (default 3600), and
+  supports `dry_run`. New `BlobBackend::list` for local + S3. SDK: `reconcile()`.
+- **`MASTER_KEY` rotation** — `MASTER_KEY_PREVIOUS` is accepted for decrypt (both old and
+  new keys work mid-rotation), and `POST /internal/v1/admin/rotate-secrets` (admin)
+  re-encrypts every tenant's secrets under the current key (never destroys an
+  undecryptable value; migrates legacy plaintext). SDK: `rotateSecrets()`.
+- **Operations runbook** (`docs/OPERATIONS.md`) — the durability model (Postgres is the
+  source of truth; the blob store must never be restored *behind* it), backup/restore,
+  GC vs reconcile, and key rotation.
+
+### Tests
+- Expanded the DB-backed integration suite (both backends): per-policy size cap (413),
+  webhook retry/backoff to a failing endpoint, reconcile (dry-run, referenced-blob
+  safety, real orphan deletion), and key-rotation round-trip. **58 e2e checks** + 37
+  unit tests.
+
 ## [1.2.0] — Image transforms
 
 ### Added

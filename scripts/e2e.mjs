@@ -8,6 +8,7 @@
 // against the local-disk or S3 driver, whichever the server is configured with).
 
 import crypto from "node:crypto";
+import fs from "node:fs";
 import http from "node:http";
 import zlib from "node:zlib";
 
@@ -483,6 +484,86 @@ async function main() {
   await storage.deleteFile(up2.fileRef);
   const gc2 = await admin.gc({ olderThanSeconds: 0 });
   check("GC reclaims the blob after the last reference is deleted", gc2.blobsDeleted >= 1);
+
+  // reset the quota (an earlier test pinned it to 1 byte) so these tests exercise
+  // their own failure modes, not the quota gate.
+  await admin.setQuota(tenant.id, 0); // 0 = unlimited
+
+  // --- per-policy size cap (413) ---
+  const grantOversize = await storage.createGrant("img"); // img cap = 1 MiB
+  const oversized = Buffer.alloc(1024 * 1024 + 1024);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(oversized); // valid PNG sig
+  let oversizeRejected = false;
+  try {
+    await client.upload(grantOversize.token, new Blob([oversized], { type: "image/png" }), {
+      fileName: "big.png",
+    });
+  } catch {
+    oversizeRejected = true;
+  }
+  check("per-policy size cap rejects an oversized upload", oversizeRejected);
+
+  // --- webhook retry / backoff to a failing endpoint ---
+  let failHits = 0;
+  const failServer = http.createServer((req, res) => {
+    failHits++;
+    res.statusCode = 500;
+    res.end("nope");
+  });
+  await new Promise((r) => failServer.listen(0, "127.0.0.1", r));
+  const failPort = failServer.address().port;
+  await admin.setWebhook(tenant.id, `http://127.0.0.1:${failPort}/hook`);
+  const grantRetry = await storage.createGrant("img");
+  await client.upload(grantRetry.token, new Blob([pngBytes(21)], { type: "image/png" }), {
+    fileName: "retry.png",
+  });
+  const wait = (ms) => new Promise((r) => setTimeout(() => r(null), ms));
+  let retried = false;
+  for (let i = 0; i < 30; i++) {
+    await wait(500); // backoff is 5s then 30s -> two attempts land within ~6s
+    if (failHits >= 2) {
+      retried = true;
+      break;
+    }
+  }
+  check("webhook retries a failing endpoint (>=2 delivery attempts)", retried);
+  const retryDeliveries = await admin.listWebhookDeliveries(tenant.id);
+  check(
+    "failing webhook delivery is not marked delivered",
+    retryDeliveries.some((d) => d.status !== "delivered"),
+  );
+  await admin.setWebhook(tenant.id, null);
+  failServer.close();
+
+  // --- reconcile: orphan-blob reclamation ---
+  const recDry = await admin.reconcile({ dryRun: true, graceSeconds: 0 });
+  check("reconcile dry-run returns a report", typeof recDry.orphansFound === "number" && recDry.dryRun === true);
+  // a real reconcile must NOT delete blobs that are still referenced
+  await admin.reconcile({ dryRun: false, graceSeconds: 0 });
+  const refIntact = await fetch(client.fileUrl(tenant.id, up304.fileRef)); // a live public file
+  check("reconcile leaves referenced blobs intact", refIntact.status === 200);
+
+  // local backend: an unreferenced blob written straight into the store is reclaimed
+  if ((process.env.STORAGE_BACKEND ?? "local") !== "s3" && process.env.DATA_ROOT) {
+    const strayDir = `${process.env.DATA_ROOT}/orphans`;
+    fs.mkdirSync(strayDir, { recursive: true });
+    const strayPath = `${strayDir}/stray-${Date.now()}`;
+    fs.writeFileSync(strayPath, "orphan bytes");
+    const recDel = await admin.reconcile({ dryRun: false, graceSeconds: 0 });
+    check(
+      "reconcile deletes an unreferenced orphan blob (local)",
+      recDel.orphansFound >= 1 && recDel.blobsDeleted >= 1 && !fs.existsSync(strayPath),
+    );
+  }
+
+  // --- MASTER_KEY rotation: re-encrypt tenant secrets; tenant stays functional ---
+  const rot = await admin.rotateSecrets();
+  check("rotateSecrets re-encrypts tenant secrets", rot.tenantsRotated >= 1);
+  // a signed URL for a PRIVATE file minted after rotation must still verify
+  const postRot = await storage.signDownload(upPhoto.fileRef);
+  const postRotUrl = postRot.url.startsWith("http") ? postRot.url : PUBLIC + postRot.url;
+  const postRotRes = await fetch(postRotUrl);
+  check("tenant signing secret intact after rotation", postRotRes.status === 200);
 
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);

@@ -452,3 +452,47 @@ pub async fn set_webhook(
     .await;
     Ok(Json(SetWebhookResponse { url, secret }))
 }
+
+/// Re-encrypt every tenant's at-rest secrets under the CURRENT master key. Run after
+/// deploying a new `MASTER_KEY` with the old one in `MASTER_KEY_PREVIOUS`; once this
+/// completes for all tenants you can drop `MASTER_KEY_PREVIOUS`.
+pub async fn rotate_secrets(
+    _admin: AdminAuth,
+    State(state): State<AppState>,
+) -> AppResult<Json<serde_json::Value>> {
+    if !state.secrets.enabled() {
+        return Err(AppError::BadRequest(
+            "MASTER_KEY is not configured; nothing to rotate".into(),
+        ));
+    }
+    let rows: Vec<(Uuid, String, Option<String>)> =
+        sqlx::query_as("SELECT id, signing_secret_enc, webhook_secret FROM tenants")
+            .fetch_all(&state.db)
+            .await?;
+
+    let mut rotated = 0u64;
+    for (id, signing, webhook) in rows {
+        let new_signing = state.secrets.reencrypt(&signing);
+        let new_webhook = webhook.as_deref().map(|w| state.secrets.reencrypt(w));
+        sqlx::query("UPDATE tenants SET signing_secret_enc = $1, webhook_secret = $2 WHERE id = $3")
+            .bind(&new_signing)
+            .bind(&new_webhook)
+            .bind(id)
+            .execute(&state.db)
+            .await?;
+        rotated += 1;
+    }
+
+    audit::record(
+        &state.db,
+        None,
+        "admin",
+        "secrets.rotate",
+        None,
+        serde_json::json!({ "tenants_rotated": rotated }),
+    )
+    .await;
+    Ok(Json(
+        serde_json::json!({ "success": true, "tenants_rotated": rotated }),
+    ))
+}

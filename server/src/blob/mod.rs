@@ -30,6 +30,14 @@ pub struct BlobStat {
     pub size_bytes: u64,
 }
 
+/// A blob as seen by a store listing (for orphan reconciliation).
+#[derive(Debug, Clone)]
+pub struct BlobEntry {
+    pub key: String,
+    /// Last-modified time, when the backend reports it (used for the grace window).
+    pub modified: Option<std::time::SystemTime>,
+}
+
 #[async_trait]
 pub trait BlobBackend: Send + Sync {
     /// Open an incremental writer for `key`. The caller writes chunks then commits.
@@ -38,6 +46,9 @@ pub trait BlobBackend: Send + Sync {
     async fn open_reader(&self, key: &str) -> AppResult<ByteStreamBody>;
     async fn delete(&self, key: &str) -> AppResult<()>;
     async fn stat(&self, key: &str) -> AppResult<BlobStat>;
+    /// List every committed blob in the store (for orphan reconciliation). Excludes
+    /// in-progress temp artifacts.
+    async fn list(&self) -> AppResult<Vec<BlobEntry>>;
 }
 
 /// Incremental, abortable writer. Drop without `commit` leaves nothing committed.
@@ -119,6 +130,36 @@ impl BlobBackend for LocalDisk {
         Ok(BlobStat {
             size_bytes: meta.len(),
         })
+    }
+
+    async fn list(&self) -> AppResult<Vec<BlobEntry>> {
+        let mut entries = Vec::new();
+        let mut stack = vec![self.root.clone()];
+        while let Some(dir) = stack.pop() {
+            let mut rd = match tokio::fs::read_dir(&dir).await {
+                Ok(rd) => rd,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(err) => return Err(err.into()),
+            };
+            while let Some(ent) = rd.next_entry().await? {
+                let path = ent.path();
+                if ent.file_type().await?.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                // Skip in-progress temp writers ("<key>.<uuid>.part").
+                if path.extension().and_then(|e| e.to_str()) == Some("part") {
+                    continue;
+                }
+                let Ok(rel) = path.strip_prefix(&self.root) else {
+                    continue;
+                };
+                let key = rel.to_string_lossy().replace('\\', "/");
+                let modified = ent.metadata().await.ok().and_then(|m| m.modified().ok());
+                entries.push(BlobEntry { key, modified });
+            }
+        }
+        Ok(entries)
     }
 }
 
@@ -271,6 +312,43 @@ impl BlobBackend for S3Backend {
         Ok(BlobStat {
             size_bytes: output.content_length().unwrap_or(0).max(0) as u64,
         })
+    }
+
+    async fn list(&self) -> AppResult<Vec<BlobEntry>> {
+        let mut entries = Vec::new();
+        let mut continuation: Option<String> = None;
+        loop {
+            let mut req = self.client.list_objects_v2().bucket(&self.bucket);
+            if let Some(token) = &continuation {
+                req = req.continuation_token(token);
+            }
+            let out = req
+                .send()
+                .await
+                .map_err(|err| AppError::Internal(format!("s3 list: {}", err.into_service_error())))?;
+            for obj in out.contents() {
+                if let Some(key) = obj.key() {
+                    let modified = obj.last_modified().and_then(|t| {
+                        u64::try_from(t.secs())
+                            .ok()
+                            .map(|s| std::time::UNIX_EPOCH + std::time::Duration::from_secs(s))
+                    });
+                    entries.push(BlobEntry {
+                        key: key.to_string(),
+                        modified,
+                    });
+                }
+            }
+            if out.is_truncated().unwrap_or(false) {
+                continuation = out.next_continuation_token().map(|s| s.to_string());
+                if continuation.is_none() {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        Ok(entries)
     }
 }
 

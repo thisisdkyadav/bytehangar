@@ -47,6 +47,8 @@ pub struct Config {
     pub internal_bind: String,
     /// Master key for encrypting tenant secrets at rest. Empty => stored as plaintext.
     pub master_key: String,
+    /// Previous master key, accepted for DECRYPT during a rotation. Empty when not rotating.
+    pub master_key_previous: String,
     /// Deployment environment ("development" | "production"). Tightens defaults.
     pub environment: String,
     /// Allowed CORS origins for the public plane. Empty => allow-all (dev only).
@@ -82,6 +84,7 @@ impl Config {
     pub fn from_env() -> AppResult<Self> {
         let environment = env_string("APP_ENV", "development");
         let master_key = env_string("MASTER_KEY", "");
+        let master_key_previous = env_string("MASTER_KEY_PREVIOUS", "");
         let admin_token = env_string("ADMIN_TOKEN", "");
         let port: u16 = env_parse("PORT", 5100)?;
         let internal_port: u16 = env_parse("INTERNAL_PORT", 5101)?;
@@ -153,6 +156,7 @@ impl Config {
             bind: env_string("BIND_ADDRESS", "0.0.0.0"),
             internal_bind: env_string("INTERNAL_BIND_ADDRESS", "127.0.0.1"),
             master_key,
+            master_key_previous,
             environment,
             allowed_origins: split_csv(&env_string("ALLOWED_ORIGINS", "")),
             rate_limit_per_second: env_parse("RATE_LIMIT_PER_SECOND", 50)?,

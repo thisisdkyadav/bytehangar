@@ -54,7 +54,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let blob = blob::from_config(&config)?;
-    let secrets = Arc::new(secrets::Secrets::new(&config.master_key));
+    let secrets = Arc::new(secrets::Secrets::with_previous(
+        &config.master_key,
+        &config.master_key_previous,
+    ));
     if secrets.enabled() {
         tracing::info!("tenant secrets encrypted at rest");
     } else {

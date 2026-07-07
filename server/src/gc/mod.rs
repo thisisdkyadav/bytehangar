@@ -185,6 +185,95 @@ pub async fn gc_handler(
     Ok(Json(report))
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct ReconcileRequest {
+    /// Skip blobs modified more recently than this (protects in-flight uploads whose
+    /// DB row hasn't committed yet). Default 3600.
+    #[serde(default)]
+    pub grace_seconds: Option<u64>,
+    /// Report only, delete nothing. Default false.
+    #[serde(default)]
+    pub dry_run: Option<bool>,
+}
+
+#[derive(Serialize)]
+pub struct ReconcileReport {
+    pub orphans_found: u64,
+    pub blobs_deleted: u64,
+    pub dry_run: bool,
+}
+
+/// Reclaim orphan blobs: physical blobs in the store that NO `files` or
+/// `file_variants` row references (e.g. from an upload that wrote the blob then
+/// crashed before committing its DB row — the dedup-safe GC can't see those).
+/// Conservative: only deletes blobs older than `grace_seconds`.
+pub async fn run_reconcile(
+    db: &PgPool,
+    blob: &dyn BlobBackend,
+    grace_seconds: u64,
+    dry_run: bool,
+) -> AppResult<ReconcileReport> {
+    use std::collections::HashSet;
+
+    // Every referenced key: live AND tombstoned files (their blobs live until GC),
+    // plus rendered variants.
+    let referenced: HashSet<String> = sqlx::query_scalar::<_, String>(
+        "SELECT stored_key FROM files UNION SELECT stored_key FROM file_variants",
+    )
+    .fetch_all(db)
+    .await?
+    .into_iter()
+    .collect();
+
+    let now = std::time::SystemTime::now();
+    let mut orphans_found = 0u64;
+    let mut blobs_deleted = 0u64;
+
+    for entry in blob.list().await? {
+        if referenced.contains(&entry.key) {
+            continue;
+        }
+        // Unknown or within-grace age => treat as recent and leave it alone.
+        let recent = match entry.modified {
+            Some(m) => now
+                .duration_since(m)
+                .map(|d| d.as_secs() < grace_seconds)
+                .unwrap_or(true),
+            None => true,
+        };
+        if recent {
+            continue;
+        }
+        orphans_found += 1;
+        if !dry_run {
+            blob.delete(&entry.key).await?;
+            blobs_deleted += 1;
+        }
+    }
+
+    Ok(ReconcileReport {
+        orphans_found,
+        blobs_deleted,
+        dry_run,
+    })
+}
+
+pub async fn reconcile_handler(
+    _admin: AdminAuth,
+    State(state): State<AppState>,
+    body: Option<Json<ReconcileRequest>>,
+) -> AppResult<Json<ReconcileReport>> {
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    let report = run_reconcile(
+        &state.db,
+        state.blob.as_ref(),
+        req.grace_seconds.unwrap_or(3600),
+        req.dry_run.unwrap_or(false),
+    )
+    .await?;
+    Ok(Json(report))
+}
+
 /// Internal GC scheduler: periodically reclaims soft-deleted blobs past the
 /// retention window. Stops on shutdown. (Grant pruning is a separate, always-on
 /// task — see `run_grant_pruner` — since grants accrue regardless of GC config.)

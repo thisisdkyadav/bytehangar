@@ -25,8 +25,11 @@ media features and a few real security/ops gaps.**
   (GHCR-on-tag + cargo-audit + dependabot + pinned toolchain), configurable content-type allowlist,
   app-supplied upload metadata, soft-delete restore, Cache-Control/ETag/conditional-GET — plus
   stored-XSS hardening (render-unsafe denylist + nosniff) from an adversarial review.
-  *Still open from v1.1:* **DB-backed integration tests** [L] (only unit + happy-path e2e today) —
-  carried into v1.2.
+- **v1.3.0** — production hardening: **orphan-blob reconcile** (store-listing sweep for bytes with no
+  DB row — the crash-mid-upload leak GC can't see), **`MASTER_KEY` rotation** (previous-key decrypt +
+  re-encrypt endpoint), an **operations/DR runbook** (`docs/OPERATIONS.md`), and an **expanded
+  DB-backed integration suite** (413, webhook retry/backoff, reconcile, rotation — 58 e2e checks). This
+  closes the DB-integration-tests item that was carried from v1.1.
 
 ---
 

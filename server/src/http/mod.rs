@@ -111,6 +111,8 @@ fn internal_routes() -> Router<AppState> {
             get(tenants::list_webhook_deliveries),
         )
         .route("/gc", post(gc::gc_handler))
+        .route("/reconcile", post(gc::reconcile_handler))
+        .route("/admin/rotate-secrets", post(tenants::rotate_secrets))
         // tenant control plane (tenant key)
         .route("/catalog", put(catalog::register_catalog))
         .route("/grants", post(grants::mint_grant))

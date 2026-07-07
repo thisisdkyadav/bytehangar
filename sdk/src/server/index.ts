@@ -182,6 +182,36 @@ export class ByteHangarServer {
     return this.request("POST", "/internal/v1/tenants", { auth: "admin", body: { name } });
   }
 
+  /**
+   * Reclaim orphan blobs — physical blobs no file/variant row references (e.g. from an
+   * upload that wrote the blob then crashed before its DB row committed). Conservative:
+   * only deletes blobs older than `graceSeconds` (default 3600). Use `dryRun` to preview.
+   */
+  async reconcile(
+    opts: { graceSeconds?: number; dryRun?: boolean } = {},
+  ): Promise<{ orphansFound: number; blobsDeleted: number; dryRun: boolean }> {
+    const data = await this.request<any>("POST", "/internal/v1/reconcile", {
+      auth: "admin",
+      body: { grace_seconds: opts.graceSeconds, dry_run: opts.dryRun },
+    });
+    return {
+      orphansFound: data.orphans_found,
+      blobsDeleted: data.blobs_deleted,
+      dryRun: data.dry_run,
+    };
+  }
+
+  /**
+   * Re-encrypt every tenant's at-rest secrets under the current `MASTER_KEY`. Run after
+   * deploying a new key with the old one in `MASTER_KEY_PREVIOUS`; then drop the previous.
+   */
+  async rotateSecrets(): Promise<{ tenantsRotated: number }> {
+    const data = await this.request<any>("POST", "/internal/v1/admin/rotate-secrets", {
+      auth: "admin",
+    });
+    return { tenantsRotated: data.tenants_rotated };
+  }
+
   async createKey(
     tenantId: string,
     name: string,
