@@ -38,13 +38,18 @@ blob store, and restore the blob store to a point at or after the DB snapshot.**
 2. **Restore the blob store** to a snapshot **at or after** the DB snapshot's time. If
    the blob store is older than the DB, some files will reference missing bytes.
 3. Point the server at both, start it (it auto-migrates — a no-op on a restored DB).
-4. **Reconcile** to remove orphan blobs the DB no longer knows about:
+4. **Reconcile** to remove orphan blobs the DB no longer knows about (the
+   `Content-Type: application/json` header is **required** — without it the body is
+   ignored and `dry_run` silently defaults to `false`, i.e. it deletes):
    ```bash
    # preview first
-   curl -XPOST $INTERNAL/internal/v1/reconcile -H "x-bytehangar-admin: $ADMIN_TOKEN" \
+   curl -XPOST $INTERNAL/internal/v1/reconcile \
+        -H "x-bytehangar-admin: $ADMIN_TOKEN" -H "Content-Type: application/json" \
         -d '{"dry_run":true}'
    # then delete
-   curl -XPOST $INTERNAL/internal/v1/reconcile -H "x-bytehangar-admin: $ADMIN_TOKEN"
+   curl -XPOST $INTERNAL/internal/v1/reconcile \
+        -H "x-bytehangar-admin: $ADMIN_TOKEN" -H "Content-Type: application/json" \
+        -d '{}'
    ```
 5. Spot-check: any DB row whose blob is missing (DB ahead of blobs) will `404` on
    download — that file is unrecoverable without an older-enough blob backup. There is no
@@ -61,10 +66,18 @@ purges tombstones past the retention window — including their rendered image v
 
 ### Reconcile (orphan blobs)
 `reconcile` lists the blob store and deletes any blob no `files`/`file_variants` row
-references — the crash-mid-upload leftovers GC can't see. It only deletes blobs older
-than `grace_seconds` (default 3600) so it can't race an in-flight upload. Run it
-occasionally (e.g. weekly) and always after a restore. It's a full store listing, so
-it's heavier than GC — schedule it off-peak, not every minute.
+references — the crash-mid-upload leftovers GC can't see. Run it occasionally (e.g.
+weekly) and always after a restore. It's a full store listing, so it's heavier than GC
+— schedule it off-peak, not every minute.
+
+> ⚠️ **The blob store (S3 bucket / `DATA_ROOT`) must be DEDICATED to this ByteHangar
+> instance.** reconcile treats *every* unreferenced object as an orphan, so pointing it
+> at a bucket shared with other applications will delete their objects. Give ByteHangar
+> its own bucket/prefix.
+
+It is safe to run against a live server: two guards protect concurrent uploads — a
+`grace_seconds` window (default 3600, floored at 60) that skips recently-written blobs,
+and a per-key DB re-check immediately before each delete. Prefer the default grace.
 
 ### Master key rotation
 Tenant signing/webhook secrets are encrypted at rest with `MASTER_KEY` (AES-256-GCM).

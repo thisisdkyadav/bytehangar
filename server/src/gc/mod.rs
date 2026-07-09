@@ -207,6 +207,19 @@ pub struct ReconcileReport {
 /// `file_variants` row references (e.g. from an upload that wrote the blob then
 /// crashed before committing its DB row — the dedup-safe GC can't see those).
 /// Conservative: only deletes blobs older than `grace_seconds`.
+///
+/// IMPORTANT: reconcile assumes the blob store (S3 bucket / `DATA_ROOT`) is DEDICATED
+/// to this ByteHangar instance — it treats every unreferenced object as an orphan. Do
+/// not point it at a store shared with other applications.
+///
+/// Data-loss safety (two independent guards, because an upload commits its blob BYTES
+/// before its DB row):
+///   1. `grace_seconds` — skip blobs modified recently, covering the brief window where
+///      a blob is committed but its row's transaction hasn't committed yet. Floored by
+///      the handler so it can't be disabled during live traffic.
+///   2. a per-key DB re-check immediately before deleting — covers a row that committed
+///      after the initial listing/snapshot. Together these make a concurrent, live
+///      upload safe even mid-reconcile.
 pub async fn run_reconcile(
     db: &PgPool,
     blob: &dyn BlobBackend,
@@ -215,6 +228,9 @@ pub async fn run_reconcile(
 ) -> AppResult<ReconcileReport> {
     use std::collections::HashSet;
 
+    // List the store FIRST, then snapshot referenced keys — so any row that committed
+    // before the snapshot is honored even if its blob was already listed.
+    let entries = blob.list().await?;
     // Every referenced key: live AND tombstoned files (their blobs live until GC),
     // plus rendered variants.
     let referenced: HashSet<String> = sqlx::query_scalar::<_, String>(
@@ -229,11 +245,11 @@ pub async fn run_reconcile(
     let mut orphans_found = 0u64;
     let mut blobs_deleted = 0u64;
 
-    for entry in blob.list().await? {
+    for entry in entries {
         if referenced.contains(&entry.key) {
             continue;
         }
-        // Unknown or within-grace age => treat as recent and leave it alone.
+        // Guard 1: unknown or within-grace age => treat as recent and leave it alone.
         let recent = match entry.modified {
             Some(m) => now
                 .duration_since(m)
@@ -242,6 +258,19 @@ pub async fn run_reconcile(
             None => true,
         };
         if recent {
+            continue;
+        }
+        // Guard 2: re-check right before deleting — a row may have committed after the
+        // snapshot above. This closes the TOCTOU independent of the grace window.
+        let still_referenced: bool = sqlx::query_scalar(
+            "SELECT EXISTS( \
+               SELECT 1 FROM files WHERE stored_key = $1 \
+               UNION ALL SELECT 1 FROM file_variants WHERE stored_key = $1)",
+        )
+        .bind(&entry.key)
+        .fetch_one(db)
+        .await?;
+        if still_referenced {
             continue;
         }
         orphans_found += 1;
@@ -258,19 +287,21 @@ pub async fn run_reconcile(
     })
 }
 
+/// Floor for `grace_seconds` — a caller can't shrink the in-flight-upload protection
+/// below this, so reconcile is safe to run against a live server.
+const RECONCILE_MIN_GRACE_SECS: u64 = 60;
+
 pub async fn reconcile_handler(
     _admin: AdminAuth,
     State(state): State<AppState>,
     body: Option<Json<ReconcileRequest>>,
 ) -> AppResult<Json<ReconcileReport>> {
     let req = body.map(|Json(b)| b).unwrap_or_default();
-    let report = run_reconcile(
-        &state.db,
-        state.blob.as_ref(),
-        req.grace_seconds.unwrap_or(3600),
-        req.dry_run.unwrap_or(false),
-    )
-    .await?;
+    let grace = req
+        .grace_seconds
+        .unwrap_or(3600)
+        .max(RECONCILE_MIN_GRACE_SECS);
+    let report = run_reconcile(&state.db, state.blob.as_ref(), grace, req.dry_run.unwrap_or(false)).await?;
     Ok(Json(report))
 }
 

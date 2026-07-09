@@ -25,6 +25,20 @@ This project adheres to [Semantic Versioning](https://semver.org/).
   safety, real orphan deletion), and key-rotation round-trip. **58 e2e checks** + 37
   unit tests.
 
+### Hardened (pre-release adversarial review)
+- **reconcile data-loss race fixed**: it now lists the store *before* snapshotting
+  referenced keys and re-checks each key against the DB immediately before deleting, so a
+  blob committed by concurrent traffic can't be deleted while its row exists. `grace_seconds`
+  is floored at 60s (can't be set to 0 to disable the in-flight-upload guard).
+- **rotate-secrets no longer reports false success**: `reencrypt` returns `None` when a
+  secret decrypts with neither key, and rotation runs per-tenant transactionally, skips
+  those tenants, and **errors** (rather than silently "succeeding") if any secret couldn't
+  be re-encrypted — so an operator can't drop `MASTER_KEY_PREVIOUS` and lose all secrets.
+- reconcile documents that the blob store must be **dedicated** to ByteHangar; the local
+  store walk is resilient to unreadable subdirs; temp writers moved to a reserved `.tmp/`
+  dir so a real key ending in `.part` is never hidden from reconcile; fixed the runbook's
+  `dry_run` curl (missing `Content-Type` made it delete).
+
 ## [1.2.0] — Image transforms
 
 ### Added

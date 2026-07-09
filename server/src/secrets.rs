@@ -48,18 +48,19 @@ impl Secrets {
     }
 
     /// Re-encrypt a stored value under the CURRENT key (used by key rotation). Decrypts
-    /// with the current-or-previous key first; a value that decrypts with neither is
-    /// returned unchanged (never destroy an unreadable secret). Legacy plaintext is
-    /// migrated to ciphertext.
-    pub fn reencrypt(&self, stored: &str) -> String {
+    /// with the current-or-previous key first. Returns `None` when a ciphertext can be
+    /// decrypted by NEITHER key — the caller must NOT overwrite it (that would preserve
+    /// an unreadable secret while falsely reporting a successful rotation). Legacy
+    /// plaintext is migrated to ciphertext.
+    pub fn reencrypt(&self, stored: &str) -> Option<String> {
         if stored.starts_with(PREFIX) {
             let plain = self.decrypt(stored);
             if plain.is_empty() {
-                return stored.to_string();
+                return None;
             }
-            return self.encrypt(&plain);
+            return Some(self.encrypt(&plain));
         }
-        self.encrypt(stored)
+        Some(self.encrypt(stored))
     }
 
     /// Encrypt a secret for storage. Returns plaintext unchanged when no master key.
@@ -156,7 +157,7 @@ mod tests {
         // Mid-rotation: current = new, previous = old.
         let rotating = Secrets::with_previous("new-key", "old-key");
         assert_eq!(rotating.decrypt(&ciphertext), "secret"); // old value still readable
-        let reencrypted = rotating.reencrypt(&ciphertext);
+        let reencrypted = rotating.reencrypt(&ciphertext).unwrap();
         // After re-encrypt, only the new key can read it.
         assert_eq!(Secrets::new("new-key").decrypt(&reencrypted), "secret");
         assert_eq!(old.decrypt(&reencrypted), "");
@@ -165,16 +166,17 @@ mod tests {
     #[test]
     fn reencrypt_migrates_legacy_plaintext() {
         let secrets = Secrets::new("k");
-        let reencrypted = secrets.reencrypt("legacy");
+        let reencrypted = secrets.reencrypt("legacy").unwrap();
         assert!(reencrypted.starts_with(PREFIX));
         assert_eq!(secrets.decrypt(&reencrypted), "legacy");
     }
 
     #[test]
-    fn reencrypt_preserves_undecryptable_value() {
-        // A value encrypted with a key we don't have must not be destroyed.
+    fn reencrypt_signals_undecryptable_value() {
+        // A value encrypted with a key we don't have must report failure, not silently
+        // "succeed" with the old ciphertext (which would falsely report a rotation).
         let orphan = Secrets::new("some-other-key").encrypt("x");
         let secrets = Secrets::new("our-key");
-        assert_eq!(secrets.reencrypt(&orphan), orphan);
+        assert_eq!(secrets.reencrypt(&orphan), None);
     }
 }

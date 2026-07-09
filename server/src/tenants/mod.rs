@@ -465,22 +465,51 @@ pub async fn rotate_secrets(
             "MASTER_KEY is not configured; nothing to rotate".into(),
         ));
     }
-    let rows: Vec<(Uuid, String, Option<String>)> =
-        sqlx::query_as("SELECT id, signing_secret_enc, webhook_secret FROM tenants")
-            .fetch_all(&state.db)
-            .await?;
+    let ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM tenants")
+        .fetch_all(&state.db)
+        .await?;
 
     let mut rotated = 0u64;
-    for (id, signing, webhook) in rows {
+    let mut failed = 0u64;
+    for id in ids {
+        // Re-read + re-write each tenant inside a short transaction (FOR UPDATE) so we
+        // can't clobber a concurrent set_webhook / provisioning change.
+        let mut tx = state.db.begin().await?;
+        let row: Option<(String, Option<String>)> = sqlx::query_as(
+            "SELECT signing_secret_enc, webhook_secret FROM tenants WHERE id = $1 FOR UPDATE",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((signing, webhook)) = row else {
+            continue; // deleted mid-rotation
+        };
+
+        // Re-encrypt both secrets; a `None` means "couldn't decrypt with either key" —
+        // don't touch that tenant, and count it so we never report a false success.
         let new_signing = state.secrets.reencrypt(&signing);
-        let new_webhook = webhook.as_deref().map(|w| state.secrets.reencrypt(w));
-        sqlx::query("UPDATE tenants SET signing_secret_enc = $1, webhook_secret = $2 WHERE id = $3")
-            .bind(&new_signing)
-            .bind(&new_webhook)
-            .bind(id)
-            .execute(&state.db)
-            .await?;
-        rotated += 1;
+        let new_webhook = match &webhook {
+            Some(w) => state.secrets.reencrypt(w).map(Some),
+            None => Some(None),
+        };
+        match (new_signing, new_webhook) {
+            (Some(sig), Some(hook)) => {
+                sqlx::query(
+                    "UPDATE tenants SET signing_secret_enc = $1, webhook_secret = $2 WHERE id = $3",
+                )
+                .bind(&sig)
+                .bind(&hook)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                rotated += 1;
+            }
+            _ => {
+                let _ = tx.rollback().await;
+                failed += 1;
+            }
+        }
     }
 
     audit::record(
@@ -489,9 +518,16 @@ pub async fn rotate_secrets(
         "admin",
         "secrets.rotate",
         None,
-        serde_json::json!({ "tenants_rotated": rotated }),
+        serde_json::json!({ "tenants_rotated": rotated, "tenants_failed": failed }),
     )
     .await;
+
+    if failed > 0 {
+        return Err(AppError::BadRequest(format!(
+            "rotated {rotated} tenant(s); {failed} could NOT be re-encrypted (undecryptable \
+             with the current or previous key). Keep MASTER_KEY_PREVIOUS set and retry."
+        )));
+    }
     Ok(Json(
         serde_json::json!({ "success": true, "tenants_rotated": rotated }),
     ))

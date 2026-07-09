@@ -94,15 +94,16 @@ impl BlobBackend for LocalDisk {
         if let Some(parent) = final_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        // Unique temp path per writer: concurrent writers of the SAME key (e.g. two
-        // requests racing to render the same content-addressed image variant) must not
-        // share a temp file, or they'd corrupt each other's bytes before the atomic
-        // rename. Each writes its own temp; the last rename wins (bytes are identical).
-        let temp = {
-            let mut t = final_path.clone().into_os_string();
-            t.push(format!(".{}.part", uuid::Uuid::now_v7()));
-            std::path::PathBuf::from(t)
-        };
+        // Temp writers live under a reserved `.tmp/` dir (same filesystem as the final
+        // key, so the commit rename stays atomic). A unique name per writer means
+        // concurrent writers of the SAME key (e.g. two requests racing to render the
+        // same content-addressed variant) don't share a temp file; the last rename wins
+        // (bytes identical). Keeping temps in `.tmp/` — never a valid stored key — means
+        // reconcile's store listing can skip them unambiguously (a real key may itself
+        // end in ".part").
+        let temp_dir = self.root.join(".tmp");
+        tokio::fs::create_dir_all(&temp_dir).await?;
+        let temp = temp_dir.join(format!("{}.part", uuid::Uuid::now_v7()));
         let file = tokio::fs::File::create(&temp).await?;
         Ok(Box::new(LocalWriter {
             file: Some(file),
@@ -136,19 +137,37 @@ impl BlobBackend for LocalDisk {
         let mut entries = Vec::new();
         let mut stack = vec![self.root.clone()];
         while let Some(dir) = stack.pop() {
+            // Resilient: one unreadable directory must not abort the whole reconcile.
             let mut rd = match tokio::fs::read_dir(&dir).await {
                 Ok(rd) => rd,
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(err) => return Err(err.into()),
-            };
-            while let Some(ent) = rd.next_entry().await? {
-                let path = ent.path();
-                if ent.file_type().await?.is_dir() {
-                    stack.push(path);
+                Err(err) => {
+                    tracing::warn!("reconcile: skipping unreadable dir {dir:?}: {err}");
                     continue;
                 }
-                // Skip in-progress temp writers ("<key>.<uuid>.part").
-                if path.extension().and_then(|e| e.to_str()) == Some("part") {
+            };
+            loop {
+                let ent = match rd.next_entry().await {
+                    Ok(Some(ent)) => ent,
+                    Ok(None) => break,
+                    Err(err) => {
+                        tracing::warn!("reconcile: skipping unreadable entry in {dir:?}: {err}");
+                        break;
+                    }
+                };
+                // Skip dot-prefixed entries (the `.tmp/` temp-writer dir + stray
+                // dotfiles). Stored keys never start with '.' (tenant UUID / lowercase
+                // category), so this can't hide a real blob — unlike matching on ".part".
+                if ent.file_name().to_string_lossy().starts_with('.') {
+                    continue;
+                }
+                let path = ent.path();
+                let ft = match ent.file_type().await {
+                    Ok(ft) => ft,
+                    Err(_) => continue,
+                };
+                if ft.is_dir() {
+                    stack.push(path);
                     continue;
                 }
                 let Ok(rel) = path.strip_prefix(&self.root) else {

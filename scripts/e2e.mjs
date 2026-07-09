@@ -536,20 +536,22 @@ async function main() {
   failServer.close();
 
   // --- reconcile: orphan-blob reclamation ---
-  const recDry = await admin.reconcile({ dryRun: true, graceSeconds: 0 });
+  const recDry = await admin.reconcile({ dryRun: true });
   check("reconcile dry-run returns a report", typeof recDry.orphansFound === "number" && recDry.dryRun === true);
   // a real reconcile must NOT delete blobs that are still referenced
-  await admin.reconcile({ dryRun: false, graceSeconds: 0 });
+  await admin.reconcile({ dryRun: false });
   const refIntact = await fetch(client.fileUrl(tenant.id, up304.fileRef)); // a live public file
   check("reconcile leaves referenced blobs intact", refIntact.status === 200);
 
-  // local backend: an unreferenced blob written straight into the store is reclaimed
+  // local backend: an unreferenced blob (backdated past the grace window) is reclaimed
   if ((process.env.STORAGE_BACKEND ?? "local") !== "s3" && process.env.DATA_ROOT) {
     const strayDir = `${process.env.DATA_ROOT}/orphans`;
     fs.mkdirSync(strayDir, { recursive: true });
     const strayPath = `${strayDir}/stray-${Date.now()}`;
     fs.writeFileSync(strayPath, "orphan bytes");
-    const recDel = await admin.reconcile({ dryRun: false, graceSeconds: 0 });
+    const past = new Date(Date.now() - 2 * 3600 * 1000); // older than the default grace
+    fs.utimesSync(strayPath, past, past);
+    const recDel = await admin.reconcile({ dryRun: false }); // default grace 3600s
     check(
       "reconcile deletes an unreferenced orphan blob (local)",
       recDel.orphansFound >= 1 && recDel.blobsDeleted >= 1 && !fs.existsSync(strayPath),
